@@ -115,6 +115,8 @@ impl App {
                     raw_input: None,
                     output: None,
                     render_header: None,
+                    parent_id: None,
+                    full_view: false,
                 });
             }
             ShellEvent::Output { id, content } => {
@@ -140,6 +142,7 @@ impl App {
                     tool: "bash".into(),
                     output: ToolOutput::Plain(output),
                     is_error,
+                    parent_id: None,
                 });
                 if let Some(msg) = result_msg {
                     self.shell.push_result(msg);

@@ -280,6 +280,9 @@ pub fn style_by_name(name: &str) -> Style {
         "dim" | "tool_dim" => t.tool_dim,
         "path" | "tool_path" => t.tool_path,
         "tool" => t.tool,
+        "tool_prefix" => t.tool_prefix,
+        "tool_success" => t.tool_success,
+        "tool_error" => t.tool_error,
         "error" => t.error,
         "bold" => t.bold,
         "italic" => t.italic,
@@ -306,6 +309,7 @@ pub fn style_by_name(name: &str) -> Style {
         "active" => t.active,
         "success" => t.todo_completed,
         "warning" => t.todo_in_progress,
+        "spinner" => t.spinner,
         _ => Style::default(),
     }
 }

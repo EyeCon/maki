@@ -342,6 +342,11 @@ pub enum UiAction {
         path: PathBuf,
         reply_tx: flume::Sender<i32>,
     },
+    ClickBuf {
+        tool_id: String,
+        live_buf: Arc<SharedBuf>,
+        done: flume::Receiver<()>,
+    },
 }
 
 #[cfg(test)]

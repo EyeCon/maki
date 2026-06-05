@@ -6,7 +6,6 @@
 //! at the bottom wire each native tool into the registry through `Native<T>`. Plan mode
 //! rejects writes to anything but the plan file before they reach the tool.
 
-mod batch;
 mod code_execution;
 mod edit;
 mod file_tracker;
@@ -117,7 +116,6 @@ pub fn is_tool_enabled(config: &AgentConfig, name: &str) -> bool {
 }
 
 pub const BASH_TOOL_NAME: &str = "bash";
-pub const BATCH_TOOL_NAME: &str = batch::Batch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
 pub const GLOB_TOOL_NAME: &str = "glob";
 pub const GREP_TOOL_NAME: &str = grep::Grep::NAME;
@@ -545,7 +543,6 @@ register_tools! {
     grep::Grep,
     todowrite::TodoWrite,
     task::Task,
-    batch::Batch,
     code_execution::CodeExecution,
 }
 

@@ -249,6 +249,7 @@ fn tool_done_transitions_plan_to_ready(output: ToolOutput, expect_ready: bool) {
         tool: "write".into(),
         output,
         is_error: false,
+        parent_id: None,
     }))));
 
     assert_eq!(app.state.plan.is_ready(), expect_ready);
@@ -648,6 +649,8 @@ fn cancel_resets_all_chats_and_indices() {
             raw_input: None,
             output: None,
             render_header: None,
+            parent_id: None,
+            full_view: false,
         })),
         "task1",
         None,
@@ -665,6 +668,7 @@ fn finish_subagent(app: &mut App, id: &str, is_error: bool) {
         tool: "task".into(),
         output: ToolOutput::Plain("result".into()),
         is_error,
+        parent_id: None,
     }))));
 }
 
@@ -984,6 +988,8 @@ fn double_esc_cancels_flushes_and_fails_tools() {
         raw_input: None,
         output: None,
         render_header: None,
+        parent_id: None,
+        full_view: false,
     }))));
 
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
@@ -1390,6 +1396,8 @@ fn resolve_or_create_chat_sets_model_id_and_annotation() {
         raw_input: None,
         output: None,
         render_header: None,
+        parent_id: None,
+        full_view: false,
     }))));
 
     app.update(subagent_msg_with_model(
@@ -1647,6 +1655,7 @@ fn retry_clears_in_progress_tools() {
     app.update(agent_msg(AgentEvent::ToolPending {
         id: "t1".into(),
         name: "bash".into(),
+        parent_id: None,
     }));
     assert_eq!(app.chats[0].in_progress_count(), 1);
 
@@ -1668,6 +1677,7 @@ fn retry_clears_subagent_in_progress_tools() {
         AgentEvent::ToolPending {
             id: "st1".into(),
             name: "bash".into(),
+            parent_id: None,
         },
         "task1",
         Some("research"),
@@ -2071,6 +2081,7 @@ fn plan_app() -> App {
             lines: vec![],
         },
         is_error: false,
+        parent_id: None,
     }))));
     app
 }
@@ -2092,6 +2103,7 @@ fn tool_done_write_opens_plan_form(mode: Mode, expect_form: bool) {
             lines: vec![],
         },
         is_error: false,
+        parent_id: None,
     }))));
     assert_eq!(app.plan_form.is_visible(), expect_form);
     if expect_form {
@@ -2126,6 +2138,7 @@ fn re_edit_keeps_plan_form_visible() {
             lines: vec![],
         },
         is_error: false,
+        parent_id: None,
     }))));
     assert!(matches!(app.state.plan, PlanState::Ready(_)));
     assert!(app.plan_form.is_visible());
@@ -2194,6 +2207,7 @@ fn rewrite_plan(app: &mut App) {
             lines: vec![],
         },
         is_error: false,
+        parent_id: None,
     }))));
 }
 
@@ -2234,6 +2248,7 @@ fn send_subagent_todo(app: &mut App, items: Vec<TodoItem>) {
             tool: "todo_write".into(),
             output: ToolOutput::TodoList(items),
             is_error: false,
+            parent_id: None,
         })),
         "task1",
         Some("research"),
@@ -2434,6 +2449,8 @@ fn agent_error_creates_synthetic_tool_done_with_message() {
         raw_input: None,
         output: None,
         render_header: None,
+        parent_id: None,
+        full_view: false,
     }))));
     assert_eq!(app.main_chat().in_progress_count(), 1);
 

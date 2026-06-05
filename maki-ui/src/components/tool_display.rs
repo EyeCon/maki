@@ -22,10 +22,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use crate::markdown::{Keep, should_truncate, text_to_lines, truncate_output, truncation_notice};
-use maki_agent::{
-    BatchToolEntry, BatchToolStatus, BufferSnapshot, InstructionBlock, SpanStyle, ToolInput,
-    ToolOutput,
-};
+use maki_agent::{BufferSnapshot, InstructionBlock, SpanStyle, ToolInput, ToolOutput};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
@@ -42,19 +39,6 @@ pub struct RenderCtx<'a> {
     pub width: u16,
     pub tool_output_lines: &'a ToolOutputLines,
     pub registry: &'a RenderHintsRegistry,
-}
-
-#[derive(Default)]
-pub struct BatchChildState {
-    pub snapshot: Option<BufferSnapshot>,
-    pub header: Option<BufferSnapshot>,
-    pub snapshot_theme_gen: u64,
-}
-
-impl BatchChildState {
-    pub fn snapshot_is_stale(&self, current_gen: u64) -> bool {
-        (self.snapshot.is_some() || self.header.is_some()) && self.snapshot_theme_gen != current_gen
-    }
 }
 
 pub(crate) fn output_limits_from_hints(
@@ -75,10 +59,6 @@ pub(crate) fn output_limits_from_hints(
 
 pub const TOOL_INDICATOR: &str = "● ";
 pub const TOOL_BODY_INDENT: &str = "  ";
-
-const TOOL_SEPARATOR: &str = "──────────────────";
-const BATCH_INDENT: &str = "  ";
-const BATCH_CONTENT_INDENT: &str = "    ";
 
 pub(crate) fn tool_output_annotation(output: &ToolOutput) -> Option<String> {
     match output {
@@ -232,7 +212,7 @@ pub struct ToolLines {
     pub lines: Vec<Line<'static>>,
     pub search_text: String,
     pub highlight: Option<HighlightRequest>,
-    pub spinner_lines: Vec<usize>,
+    pub spinner_lines: Vec<(usize, usize)>,
     pub content_indent: &'static str,
     pub truncation: SectionFlags,
 }
@@ -263,8 +243,7 @@ impl HighlightRequest {
             ToolOutput::Plain(_)
             | ToolOutput::Markdown(_)
             | ToolOutput::ReadDir { .. }
-            | ToolOutput::TodoList(_)
-            | ToolOutput::Batch { .. } => None,
+            | ToolOutput::TodoList(_) => None,
         });
         if input.is_none() && output.is_none() {
             return None;
@@ -340,7 +319,6 @@ pub fn append_right_info(
 }
 
 enum Indicator {
-    Pending,
     InProgress,
     Success,
     Error,
@@ -352,17 +330,6 @@ impl From<ToolStatus> for Indicator {
             ToolStatus::InProgress => Self::InProgress,
             ToolStatus::Success => Self::Success,
             ToolStatus::Error => Self::Error,
-        }
-    }
-}
-
-impl From<BatchToolStatus> for Indicator {
-    fn from(s: BatchToolStatus) -> Self {
-        match s {
-            BatchToolStatus::Pending => Self::Pending,
-            BatchToolStatus::InProgress => Self::InProgress,
-            BatchToolStatus::Success => Self::Success,
-            BatchToolStatus::Error => Self::Error,
         }
     }
 }
@@ -381,14 +348,6 @@ fn resolve_output<'a>(
     limits: RenderLimits,
     keep: Keep,
 ) -> ResolvedOutput<'a> {
-    if let Some(ToolOutput::Batch { .. }) = output {
-        return ResolvedOutput {
-            text: None,
-            full_text: None,
-            skipped: 0,
-        };
-    }
-
     let full_text: Option<Cow<'a, str>> = match output {
         Some(ToolOutput::Plain(t) | ToolOutput::Markdown(t)) => Some(Cow::Borrowed(t.as_str())),
         Some(ToolOutput::ReadDir { text, .. }) => Some(Cow::Borrowed(text.as_str())),
@@ -452,10 +411,9 @@ fn resolve_output<'a>(
 struct ToolLineBuilder {
     lines: Vec<Line<'static>>,
     search_text: String,
-    spinner_lines: Vec<usize>,
+    spinner_lines: Vec<(usize, usize)>,
     content_range: (usize, usize),
     width: u16,
-    outer_indent: &'static str,
     truncation: SectionFlags,
     limits: RenderLimits,
     keep: Keep,
@@ -466,7 +424,6 @@ struct ToolLineBuilder {
 impl ToolLineBuilder {
     fn new(
         width: u16,
-        outer_indent: &'static str,
         expanded: SectionFlags,
         output_limits: OutputLimits,
         hints: &ToolRenderHints,
@@ -477,8 +434,7 @@ impl ToolLineBuilder {
             search_text: String::new(),
             spinner_lines: Vec::new(),
             content_range: (0, 0),
-            width: width.saturating_sub(outer_indent.len() as u16),
-            outer_indent,
+            width,
             truncation: SectionFlags::default(),
             limits,
             keep: output_limits.keep,
@@ -537,9 +493,8 @@ impl ToolLineBuilder {
 
     fn prepend_indicator(&mut self, indicator: Indicator, started_at: Instant) {
         let (text, style) = match indicator {
-            Indicator::Pending => ("○ ".into(), theme::current().tool_dim),
             Indicator::InProgress => {
-                self.spinner_lines.push(0);
+                self.spinner_lines.push((0, 0));
                 let ch = spinner_frame(started_at.elapsed().as_millis());
                 (format!("{ch} "), theme::current().spinner)
             }
@@ -635,33 +590,12 @@ impl ToolLineBuilder {
         }
     }
 
-    fn prepend_separator(&mut self, index: usize) {
-        if index == 0 {
-            return;
-        }
-        let sep = [
-            Line::default(),
-            Line::from(Span::styled(TOOL_SEPARATOR, theme::current().tool_dim)),
-            Line::default(),
-        ];
-        self.lines.splice(0..0, sep);
-        self.spinner_lines.iter_mut().for_each(|l| *l += 3);
-        self.content_range.0 += 3;
-        self.content_range.1 += 3;
-        self.search_text.insert(0, '\n');
-    }
-
     fn finish(
-        mut self,
+        self,
         input: Option<Arc<ToolInput>>,
         output: Option<Arc<ToolOutput>>,
         content_indent: &'static str,
     ) -> ToolLines {
-        if !self.outer_indent.is_empty() {
-            for line in &mut self.lines {
-                line.spans.insert(0, Span::raw(self.outer_indent));
-            }
-        }
         let highlight = HighlightRequest::new(self.content_range, input, output, self.limits);
         ToolLines {
             lines: self.lines,
@@ -747,13 +681,44 @@ pub fn build_tool_lines(
 ) -> ToolLines {
     let tool_name = msg.role.tool_name().unwrap_or("?");
     let hints = rctx.registry.get(tool_name);
+
+    if hints.full_view
+        && let Some(ref snapshot) = msg.render_snapshot
+    {
+        let lines = snapshot_to_lines_range(snapshot, "", 0..snapshot.lines.len());
+        let mut spinner_lines = Vec::new();
+        for (line_idx, sline) in snapshot.lines.iter().enumerate() {
+            for (span_idx, span) in sline.spans.iter().enumerate() {
+                if matches!(&span.style, SpanStyle::Named(n) if n == "spinner") {
+                    spinner_lines.push((line_idx, span_idx + 1));
+                }
+            }
+        }
+        let search_text = msg
+            .tool_output
+            .as_ref()
+            .and_then(|o| match o.as_ref() {
+                ToolOutput::Plain(t) | ToolOutput::Markdown(t) => Some(t.to_owned()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        return ToolLines {
+            lines,
+            search_text,
+            highlight: None,
+            spinner_lines,
+            content_indent: "",
+            truncation: SectionFlags::default(),
+        };
+    }
+
     let limits = output_limits_from_hints(tool_name, hints, rctx.tool_output_lines);
     let (header, body) = match msg.text.split_once('\n') {
         Some((h, b)) => (h, Some(b)),
         None => (msg.text.as_str(), None),
     };
 
-    let mut b = ToolLineBuilder::new(rctx.width, "", expanded, limits, hints);
+    let mut b = ToolLineBuilder::new(rctx.width, expanded, limits, hints);
     b.apply_output_format(msg.tool_output.as_deref());
     b.push_header(
         tool_name,
@@ -796,48 +761,6 @@ pub fn truncate_to_header(text: &mut String) {
     text.truncate(end);
 }
 
-pub fn build_batch_entry_lines(
-    entry: &BatchToolEntry,
-    index: usize,
-    rctx: &RenderCtx,
-    expanded: SectionFlags,
-    child_state: Option<&BatchChildState>,
-) -> ToolLines {
-    let hints = rctx.registry.get(&entry.tool);
-    let limits = output_limits_from_hints(&entry.tool, hints, rctx.tool_output_lines);
-    let mut annotation = entry.annotation.clone();
-    if let Some(suffix) = entry.output.as_ref().and_then(tool_output_annotation) {
-        append_annotation(&mut annotation, &suffix);
-    }
-
-    let mut b = ToolLineBuilder::new(rctx.width, BATCH_INDENT, expanded, limits, hints);
-    b.apply_output_format(entry.output.as_ref());
-    b.push_header(
-        &entry.tool,
-        &entry.summary,
-        annotation.as_deref(),
-        child_state.and_then(|s| s.header.as_ref()),
-    );
-    b.prepend_indicator(entry.status.into(), rctx.started_at);
-    b.push_code_content(entry.input.as_ref(), entry.output.as_ref());
-    if let Some(snap) = child_state.and_then(|s| s.snapshot.as_ref()) {
-        let search_text = entry.output.as_ref().and_then(|o| match o {
-            ToolOutput::Plain(t) | ToolOutput::Markdown(t) => Some(t.as_str()),
-            _ => None,
-        });
-        b.push_snapshot(snap, search_text);
-    } else {
-        let resolved = resolve_output(entry.output.as_ref(), None, None, 0, b.limits, b.keep);
-        b.push_resolved_output(&resolved);
-    }
-    b.prepend_separator(index);
-    b.finish(
-        entry.input.clone().map(Arc::new),
-        entry.output.clone().map(Arc::new),
-        BATCH_CONTENT_INDENT,
-    )
-}
-
 pub(crate) fn append_annotation(ann: &mut Option<String>, suffix: &str) {
     match ann {
         Some(a) => write!(a, " · {suffix}").unwrap(),
@@ -849,15 +772,7 @@ pub fn build_instructions_lines(
     blocks: &[InstructionBlock],
     width: u16,
     expanded: bool,
-    batch_index: Option<usize>,
 ) -> ToolLines {
-    let in_batch = batch_index.is_some();
-    let (outer_indent, content_indent) = if in_batch {
-        (BATCH_INDENT, BATCH_CONTENT_INDENT)
-    } else {
-        ("", TOOL_BODY_INDENT)
-    };
-
     let header = blocks.first().map_or("", |b| b.path.as_str());
     let annotation = if blocks.len() > 1 {
         Some(format!("+{}", blocks.len() - 1))
@@ -873,13 +788,7 @@ pub fn build_instructions_lines(
         script: false,
         output: expanded,
     };
-    let mut b = ToolLineBuilder::new(
-        width,
-        outer_indent,
-        exp,
-        limits,
-        &ToolRenderHints::default(),
-    );
+    let mut b = ToolLineBuilder::new(width, exp, limits, &ToolRenderHints::default());
     b.push_header("load", header, annotation.as_deref(), None);
     b.prepend_indicator(Indicator::Success, Instant::now());
 
@@ -887,9 +796,8 @@ pub fn build_instructions_lines(
     let has_truncation =
         code_view::render_instructions(blocks, &mut b.lines, b.limits.output, false);
     b.truncation.output |= has_truncation;
-    let inner_indent = &content_indent[outer_indent.len()..];
     for line in &mut b.lines[start..] {
-        line.spans.insert(0, Span::raw(inner_indent));
+        line.spans.insert(0, Span::raw(TOOL_BODY_INDENT));
     }
     b.content_range = (start, b.lines.len());
 
@@ -901,13 +809,10 @@ pub fn build_instructions_lines(
             .join("\n\n"),
     );
 
-    if let Some(idx) = batch_index {
-        b.prepend_separator(idx);
-    }
     let output = Arc::new(ToolOutput::Instructions {
         blocks: blocks.to_vec(),
     });
-    b.finish(None, Some(output), content_indent)
+    b.finish(None, Some(output), TOOL_BODY_INDENT)
 }
 
 #[cfg(test)]
@@ -920,8 +825,7 @@ mod tests {
     use crate::markdown::TRUNCATION_PREFIX;
     use maki_agent::tools::{BASH_TOOL_NAME, READ_TOOL_NAME, TASK_TOOL_NAME};
     use maki_agent::{
-        BatchToolEntry, BatchToolStatus, GrepFileEntry, GrepMatchGroup, SnapshotLine, SnapshotSpan,
-        ToolInput, ToolOutput,
+        GrepFileEntry, GrepMatchGroup, SnapshotLine, SnapshotSpan, ToolInput, ToolOutput,
     };
     use test_case::test_case;
 
@@ -977,6 +881,7 @@ mod tests {
                 id: "t1".into(),
                 status,
                 name: BASH_TOOL_NAME.into(),
+                parent_id: None,
             })),
             text: text.into(),
             tool_input: input.map(Arc::new),
@@ -1113,33 +1018,6 @@ mod tests {
         bash_msg("cmd", ToolStatus::Success, None, None)
     }
 
-    fn batch_entry(
-        tool: &str,
-        status: BatchToolStatus,
-        input: Option<ToolInput>,
-        output: Option<ToolOutput>,
-    ) -> BatchToolEntry {
-        BatchToolEntry {
-            tool: tool.into(),
-            summary: "test".into(),
-            status,
-            input,
-            raw_input: None,
-            output,
-            annotation: None,
-        }
-    }
-
-    fn batch_lines(entry: &BatchToolEntry, index: usize) -> ToolLines {
-        build_batch_entry_lines(
-            entry,
-            index,
-            &test_rctx(80, &reg()),
-            SectionFlags::default(),
-            None,
-        )
-    }
-
     #[test_case(80, true  ; "shown_when_width_sufficient")]
     #[test_case(10, false ; "hidden_when_too_narrow")]
     fn append_right_info_timestamp_visibility(width: u16, expect_timestamp: bool) {
@@ -1162,62 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn batch_entry_annotation_rendered() {
-        let mut entry = batch_entry(
-            "read",
-            BatchToolStatus::Success,
-            None,
-            Some(ToolOutput::ReadCode {
-                path: "src/main.rs".into(),
-                start_line: 1,
-                lines: vec!["x".into(); 42],
-                total_lines: 42,
-                instructions: None,
-            }),
-        );
-        entry.summary = "src/main.rs".into();
-        let tl = batch_lines(&entry, 0);
-        assert!(lines_text(&tl).contains("(42 lines)"));
-    }
-
-    #[test]
-    fn batch_entry_code_input_rendered() {
-        let entry = batch_entry("bash", BatchToolStatus::Success, code_input(), None);
-        let tl = batch_lines(&entry, 0);
-        assert!(lines_text(&tl).contains("echo hi"));
-    }
-
-    #[test_case(BatchToolStatus::InProgress, &[0]    ; "in_progress_has_spinner")]
-    #[test_case(BatchToolStatus::Pending,    &[]     ; "pending_no_spinner")]
-    #[test_case(BatchToolStatus::Success,    &[]     ; "success_no_spinner")]
-    fn batch_entry_spinner(status: BatchToolStatus, expected: &[usize]) {
-        let entry = batch_entry("bash", status, None, None);
-        let tl = batch_lines(&entry, 0);
-        assert_eq!(tl.spinner_lines, expected);
-    }
-
-    #[test]
-    fn batch_entry_separator_on_nonzero_index() {
-        let entry = batch_entry("bash", BatchToolStatus::Success, None, None);
-        let first = batch_lines(&entry, 0);
-        let second = batch_lines(&entry, 1);
-        assert!(second.lines.len() > first.lines.len());
-        assert!(spans_text(&second.lines[1].spans).contains(TOOL_SEPARATOR));
-    }
-
-    #[test]
-    fn batch_entry_plain_output_rendered() {
-        let entry = batch_entry(
-            "bash",
-            BatchToolStatus::Success,
-            None,
-            Some(ToolOutput::Plain("hello world".into())),
-        );
-        let tl = batch_lines(&entry, 0);
-        assert!(lines_text(&tl).contains("hello world"));
-    }
-
-    #[test]
     fn annotation_rendered_on_header() {
         let mut msg = tool_msg();
         msg.annotation = Some("2m timeout".into());
@@ -1229,14 +1051,6 @@ mod tests {
         );
         let text = lines_text(&tl);
         assert!(text.contains("(2m timeout)"));
-    }
-
-    #[test]
-    fn batch_entry_stored_annotation_rendered() {
-        let mut entry = batch_entry("task", BatchToolStatus::Success, None, None);
-        entry.annotation = Some("anthropic/claude-haiku-4-20250414".into());
-        let tl = batch_lines(&entry, 0);
-        assert!(lines_text(&tl).contains("(anthropic/claude-haiku-4-20250414)"));
     }
 
     #[test_case("bash",  ToolOutput::Plain("ok".into()),                      Some("1 lines")     ; "plain_short_annotates")]
@@ -1270,6 +1084,7 @@ mod tests {
                 id: "t1".into(),
                 status: ToolStatus::Success,
                 name: TASK_TOOL_NAME.into(),
+                parent_id: None,
             })),
             text: "Find auth".into(),
             tool_input: None,
@@ -1359,32 +1174,13 @@ mod tests {
         assert_hr_fits(&tl, width);
     }
 
-    #[test]
-    fn batch_task_hr_fits_within_width() {
-        let width: u16 = 60;
-        let entry = batch_entry(
-            TASK_TOOL_NAME,
-            BatchToolStatus::Success,
-            None,
-            Some(ToolOutput::Plain("before\n\n---\n\nafter".into())),
-        );
-        let r = reg();
-        let tl = build_batch_entry_lines(
-            &entry,
-            0,
-            &test_rctx(width, &r),
-            SectionFlags::default(),
-            None,
-        );
-        assert_hr_fits(&tl, width);
-    }
-
     fn index_msg(body: &str) -> DisplayMessage {
         DisplayMessage {
             role: DisplayRole::Tool(Box::new(ToolRole {
                 id: "t1".into(),
                 status: ToolStatus::Success,
                 name: "index".into(),
+                parent_id: None,
             })),
             text: format!("src/lib.rs\n{body}"),
             tool_input: None,
@@ -1424,6 +1220,7 @@ mod tests {
                 id: "t1".into(),
                 status: ToolStatus::Success,
                 name: "index".into(),
+                parent_id: None,
             })),
             text: "src/lib.rs\nplain fallback".into(),
             tool_input: None,
@@ -1450,23 +1247,6 @@ mod tests {
                     .collect(),
             ),
         }
-    }
-
-    #[test_case(false, false, false => false ; "no_snapshot_never_stale")]
-    #[test_case(true,  false, true  => false ; "has_snapshot_matching_gen_fresh")]
-    #[test_case(true,  false, false => true  ; "has_snapshot_mismatched_gen_stale")]
-    fn batch_child_snapshot_is_stale(has_body: bool, has_header: bool, gen_match: bool) -> bool {
-        const CURRENT_GEN: u64 = 7;
-        let state = BatchChildState {
-            snapshot: has_body.then(|| make_snapshot(vec![vec![]])),
-            header: has_header.then(|| make_snapshot(vec![vec![]])),
-            snapshot_theme_gen: if gen_match {
-                CURRENT_GEN
-            } else {
-                CURRENT_GEN + 1
-            },
-        };
-        state.snapshot_is_stale(CURRENT_GEN)
     }
 
     #[test]
@@ -1528,11 +1308,6 @@ mod tests {
     #[test_case(
         Some(ToolOutput::Plain(String::new())), None, "bash", false
         ; "empty_plain_resolves_to_none"
-    )]
-    #[test_case(
-        Some(ToolOutput::Batch { entries: vec![], text: String::new() }),
-        None, "batch", false
-        ; "batch_always_none"
     )]
     #[test_case(
         Some(ToolOutput::ReadDir { text: "dir listing".into(), instructions: None }),
@@ -1605,6 +1380,7 @@ mod tests {
                 id: "t1".into(),
                 status,
                 name: BASH_TOOL_NAME.into(),
+                parent_id: None,
             })),
             text,
             tool_input: None,
@@ -1704,6 +1480,7 @@ mod tests {
                 id: "t1".into(),
                 status: ToolStatus::Success,
                 name: READ_TOOL_NAME.into(),
+                parent_id: None,
             })),
             text: "read /src/main.rs".into(),
             tool_input: None,
@@ -1733,7 +1510,7 @@ mod tests {
         let msg = read_msg_with_instructions(3, 30);
         let output = msg.tool_output.as_deref().unwrap();
         let blocks = output.instructions().unwrap();
-        let tl = build_instructions_lines(blocks, 80, expanded, None);
+        let tl = build_instructions_lines(blocks, 80, expanded);
         assert_eq!(tl.truncation.any(), expect_truncation);
         let text = lines_text(&tl);
         assert_eq!(text.contains("inst 29"), expect_all_visible);
@@ -1761,28 +1538,10 @@ mod tests {
             path: "agents.md".into(),
             content: "follow style guide".into(),
         }];
-        let tl = build_instructions_lines(&blocks, 80, false, None);
+        let tl = build_instructions_lines(&blocks, 80, false);
         assert!(tl.highlight.is_some());
         let text = lines_text(&tl);
         assert!(text.contains("follow style guide"));
-    }
-
-    #[test]
-    fn instructions_in_batch_has_indent_and_separator() {
-        let blocks = vec![InstructionBlock {
-            path: "agents.md".into(),
-            content: "follow style guide".into(),
-        }];
-        let tl = build_instructions_lines(&blocks, 80, false, Some(1));
-        let text = lines_text(&tl);
-        assert!(text.contains("load> "));
-        assert_eq!(tl.content_indent, BATCH_CONTENT_INDENT);
-        assert!(
-            tl.lines
-                .iter()
-                .any(|l| l.spans.iter().any(|s| s.content.contains('─'))),
-            "batch instruction should have separator"
-        );
     }
 
     #[test]
@@ -1857,6 +1616,7 @@ mod tests {
                 id: "t1".into(),
                 status: ToolStatus::Success,
                 name: "index".into(),
+                parent_id: None,
             })),
             text: "src/lib.rs\nbody_text_here".into(),
             tool_input: None,
@@ -1895,6 +1655,7 @@ mod tests {
                 id: "t1".into(),
                 status: ToolStatus::Success,
                 name: "index".into(),
+                parent_id: None,
             })),
             text: "header\nbody_fallback".into(),
             tool_input: None,
@@ -1997,5 +1758,63 @@ mod tests {
         let lines = snapshot_to_lines_range(&snapshot, "", 0..1);
         let texts: Vec<&str> = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(texts, vec!["", "aaa", "bbb", "ccc"]);
+    }
+
+    #[test]
+    fn full_view_spinner_index_accounts_for_indent_span() {
+        let snapshot = make_snapshot(vec![vec![
+            SnapshotSpan {
+                text: "◐ ".into(),
+                style: SpanStyle::Named("spinner".into()),
+            },
+            SnapshotSpan {
+                text: "batch> 2 tools".into(),
+                style: SpanStyle::Default,
+            },
+        ]]);
+        let mut r = reg();
+        r.set_full_view("batch");
+        let msg = DisplayMessage {
+            role: DisplayRole::Tool(Box::new(ToolRole {
+                id: "t1".into(),
+                status: ToolStatus::InProgress,
+                name: "batch".into(),
+                parent_id: None,
+            })),
+            text: "2 tools".into(),
+            tool_input: None,
+            tool_raw_input: None,
+            tool_output: None,
+            live_output: None,
+            annotation: None,
+            plan_path: None,
+            truncated_lines: 0,
+            timestamp: None,
+            turn_usage: None,
+            render_snapshot: Some(snapshot),
+            render_header: None,
+            snapshot_theme_gen: 0,
+        };
+        let tl = build_tool_lines(&msg, ToolStatus::InProgress, &test_rctx(80, &r), exp(false));
+        assert_eq!(tl.spinner_lines.len(), 1);
+        let (line_idx, span_idx) = tl.spinner_lines[0];
+        assert_eq!(line_idx, 0);
+        assert_eq!(span_idx, 1, "should skip the prepended indent span");
+        let original_width: usize = tl.lines[0]
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let mut line = tl.lines[0].clone();
+        line.spans[span_idx] = Span::raw("⠧ ");
+        let after_width: usize = line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        assert_eq!(
+            original_width, after_width,
+            "spinner replacement must not change line width"
+        );
     }
 }

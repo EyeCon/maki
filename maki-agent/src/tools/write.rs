@@ -68,9 +68,12 @@ impl super::ToolInvocation for Write {
     fn start_header(&self) -> super::HeaderFuture {
         super::HeaderFuture::Ready(super::HeaderResult::plain(Write::start_header(self)))
     }
-    fn start_output(&self) -> Option<ToolOutput> {
-        let path = super::resolve_path(&self.path).ok()?;
-        Some(self.write_output(&path, maki_config::DEFAULT_MAX_OUTPUT_LINES))
+    fn start_output(&self) -> super::BoxFuture<'_, Option<ToolOutput>> {
+        let output = (|| {
+            let path = super::resolve_path(&self.path).ok()?;
+            Some(self.write_output(&path, maki_config::DEFAULT_MAX_OUTPUT_LINES))
+        })();
+        Box::pin(std::future::ready(output))
     }
     fn mutable_path(&self) -> Option<&Path> {
         Some(Path::new(&self.path))

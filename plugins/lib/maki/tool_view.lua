@@ -1,6 +1,19 @@
 local ToolView = {}
 ToolView.__index = ToolView
 
+local BODY_INDENT = "  "
+
+local function indent_line(line)
+  if type(line) == "string" then
+    return BODY_INDENT .. line
+  end
+  local out = { { BODY_INDENT } }
+  for _, span in ipairs(line) do
+    out[#out + 1] = span
+  end
+  return out
+end
+
 local function format_line_nr(fmt, idx)
   return { string.format(fmt, idx), "line_nr" }
 end
@@ -41,6 +54,33 @@ end
 
 function ToolView:set_header(lines)
   self.header = lines
+  self:flush()
+end
+
+function ToolView:set_tool_header(tool_name, summary, annotation, status)
+  local indicator_style
+  local indicator_text
+  if status == "running" or status == "pending" then
+    indicator_style = "spinner"
+    indicator_text = "◐ "
+  elseif status == "error" then
+    indicator_style = "tool_error"
+    indicator_text = "● "
+  else
+    indicator_style = "tool_success"
+    indicator_text = "● "
+  end
+  local line = {
+    { indicator_text, indicator_style },
+    { tool_name .. "> ", "tool_prefix" },
+  }
+  if summary and summary ~= "" then
+    line[#line + 1] = { summary }
+  end
+  if annotation and annotation ~= "" then
+    line[#line + 1] = { " (" .. annotation .. ")", "dim" }
+  end
+  self._tool_header = { line }
   self:flush()
 end
 
@@ -157,16 +197,27 @@ end
 function ToolView:flush()
   local lines = {}
 
+  if self._tool_header then
+    for _, h in ipairs(self._tool_header) do
+      lines[#lines + 1] = h
+    end
+  end
+
+  local indent = self._tool_header ~= nil
+  local function push(line)
+    lines[#lines + 1] = indent and indent_line(line) or line
+  end
+
   for _, h in ipairs(self.header) do
-    lines[#lines + 1] = h
+    push(h)
   end
 
   if self.expanded then
     for _, line in ipairs(self.all_lines) do
-      lines[#lines + 1] = line
+      push(line)
     end
     if self.all_skipped > 0 then
-      lines[#lines + 1] = { { self.all_skipped .. " lines omitted", "dim" } }
+      push({ { self.all_skipped .. " lines omitted", "dim" } })
     end
   else
     local hidden = self.skipped
@@ -175,16 +226,16 @@ function ToolView:flush()
       or nil
 
     if self.keep == "tail" and notice then
-      lines[#lines + 1] = notice
+      push(notice)
     end
 
     for i = 0, self.ring_count - 1 do
       local idx = ((self.ring_start - 1 + i) % self.max) + 1
-      lines[#lines + 1] = self.ring[idx]
+      push(self.ring[idx])
     end
 
     if self.keep == "head" and notice then
-      lines[#lines + 1] = notice
+      push(notice)
     end
   end
 

@@ -80,6 +80,7 @@ pub async fn run(
         tool: Arc::clone(&tool_id),
         output: ToolOutput::Plain(msg),
         is_error: true,
+        parent_id: None,
     };
 
     if let Some(entry) = entry {
@@ -119,7 +120,9 @@ pub async fn run(
             annotation: invocation.start_annotation(),
             input: invocation.start_input(),
             raw_input: Some(input.clone()),
-            output: invocation.start_output(),
+            output: invocation.start_output().await,
+            parent_id: None,
+            full_view: entry.tool.full_view(),
         };
         if matches!(emit, Emit::Notify) {
             let _ = ctx.event_tx.send(AgentEvent::ToolStart(Box::new(start)));
@@ -145,6 +148,7 @@ pub async fn run(
                     tool: tool_id,
                     output,
                     is_error: false,
+                    parent_id: None,
                 }
             }
             Err(message) => {
@@ -169,6 +173,8 @@ pub async fn run(
             input: None,
             raw_input: Some(input.clone()),
             output: None,
+            parent_id: None,
+            full_view: false,
         };
         if matches!(emit, Emit::Notify) {
             let _ = ctx.event_tx.send(AgentEvent::ToolStart(Box::new(start)));
@@ -215,6 +221,7 @@ async fn execute_mcp_tool(
         tool: Arc::clone(&tool_id),
         output: ToolOutput::Plain(output),
         is_error,
+        parent_id: None,
     };
 
     if matches!(ctx.mode, AgentMode::Plan(_)) {

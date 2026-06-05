@@ -8,6 +8,7 @@ pub mod input;
 pub mod keybindings;
 pub(crate) mod list_picker;
 pub(crate) mod lua_float;
+pub mod lua_render;
 pub(crate) mod mcp_picker;
 pub mod messages;
 pub(crate) mod modal;
@@ -329,6 +330,7 @@ pub struct ToolRole {
     pub id: String,
     pub status: ToolStatus,
     pub name: Arc<str>,
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

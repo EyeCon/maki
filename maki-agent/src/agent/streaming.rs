@@ -12,7 +12,11 @@ async fn forward_provider_events(prx: flume::Receiver<ProviderEvent>, event_tx: 
         let ae = match pe {
             ProviderEvent::TextDelta { text } => AgentEvent::TextDelta { text },
             ProviderEvent::ThinkingDelta { text } => AgentEvent::ThinkingDelta { text },
-            ProviderEvent::ToolUseStart { id, name } => AgentEvent::ToolPending { id, name },
+            ProviderEvent::ToolUseStart { id, name } => AgentEvent::ToolPending {
+                id,
+                name,
+                parent_id: None,
+            },
         };
         if event_tx.send(ae).is_err() {
             break;

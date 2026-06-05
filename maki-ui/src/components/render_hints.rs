@@ -44,6 +44,7 @@ pub struct ToolRenderHints {
     pub body_format: BodyFormat,
     pub truncate_lines: Option<usize>,
     pub truncate_at: OutputKeep,
+    pub full_view: bool,
 }
 
 impl Default for ToolRenderHints {
@@ -69,6 +70,7 @@ impl ToolRenderHints {
         body_format: BodyFormat::Plain,
         truncate_lines: None,
         truncate_at: OutputKeep::Head,
+        full_view: false,
     };
 }
 
@@ -103,6 +105,13 @@ impl RenderHintsRegistry {
             .map(|(name, h)| (Arc::from(*name), *h))
             .collect();
         Self { hints }
+    }
+
+    pub fn set_full_view(&mut self, name: &str) {
+        self.hints
+            .entry(Arc::from(name))
+            .or_insert(ToolRenderHints::DEFAULT)
+            .full_view = true;
     }
 
     pub fn get(&self, name: &str) -> &ToolRenderHints {

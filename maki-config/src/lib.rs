@@ -60,6 +60,7 @@ pub const MIN_STREAM_TIMEOUT_SECS: u64 = 10;
 
 pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
+    "batch",
     "glob",
     "index",
     "memory",

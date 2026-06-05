@@ -5,7 +5,7 @@ use maki_agent::types::InlineStyle;
 use maki_agent::{SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
 use mlua::{Function, Result as LuaResult, UserData, UserDataMethods, Value as LuaValue};
 
-use crate::runtime::{with_click_handlers, with_live_ctx};
+use crate::runtime::{register_click_handler, with_live_ctx};
 
 /// `live_buf` tracks the first buffer a handler creates, which is the one
 /// the runtime streams to the UI during execution.
@@ -106,20 +106,43 @@ impl UserData for BufHandle {
 
         methods.add_method("len", |_lua, this, ()| Ok(this.buf.len()));
 
+        methods.add_method(
+            "embed",
+            |_lua,
+             this,
+             (other, indent, first_indent): (
+                mlua::AnyUserData,
+                Option<String>,
+                Option<String>,
+            )| {
+                let other = other.borrow::<BufHandle>()?;
+                if !this
+                    .buf
+                    .embed(&other.buf, indent.unwrap_or_default(), first_indent)
+                {
+                    return Err(mlua::Error::runtime("buf:embed would create a cycle"));
+                }
+                Ok(())
+            },
+        );
+
+        methods.add_method("assign", |_lua, this, other: mlua::AnyUserData| {
+            let other = other.borrow::<BufHandle>()?;
+            if !this.buf.assign(&other.buf) {
+                return Err(mlua::Error::runtime("buf:assign would create a cycle"));
+            }
+            Ok(())
+        });
+
         methods.add_method("on", |lua, this, (event, callback): (String, Function)| {
             if event != "click" {
                 return Err(mlua::Error::runtime(format!("unsupported event: {event}")));
             }
-            let Some(tool_id) = with_live_ctx(lua, |live| live.tool_use_id.clone()) else {
+            let Some(owner) = with_live_ctx(lua, |live| live.tool_use_id.clone()) else {
                 return Ok(());
             };
             let key = lua.create_registry_value(callback)?;
-            let buf = Arc::clone(&this.buf);
-            with_click_handlers(lua, |handlers| {
-                if let Some((old_key, _)) = handlers.insert(tool_id, (key, buf)) {
-                    let _ = lua.remove_registry_value(old_key);
-                }
-            });
+            register_click_handler(lua, &this.buf, key, Some(owner));
             Ok(())
         });
     }
@@ -542,7 +565,7 @@ mod tests {
 
     fn test_lua_with_handlers() -> mlua::Lua {
         let lua = test_lua();
-        lua.set_app_data(HashMap::<String, (mlua::RegistryKey, Arc<SharedBuf>)>::new());
+        lua.set_app_data(crate::runtime::ClickHandlerMap::new());
         lua
     }
 
@@ -555,10 +578,8 @@ mod tests {
             .exec()
             .unwrap();
 
-        let handlers = lua
-            .app_data_ref::<HashMap<String, (mlua::RegistryKey, Arc<SharedBuf>)>>()
-            .unwrap();
-        assert!(handlers.is_empty(), "no-op should not register a handler");
+        let count = crate::runtime::with_click_handlers(&lua, |h| h.len()).unwrap_or(0);
+        assert_eq!(count, 0, "no-op should not register a handler");
     }
 
     #[test]
@@ -570,13 +591,32 @@ mod tests {
         lua.load(r#"buf:on("click", function() return 1 end)"#)
             .exec()
             .unwrap();
-        let registered = with_click_handlers(&lua, |h| h.contains_key("tool_123")).unwrap_or(false);
-        assert!(registered, "handler should be registered for tool_123");
+        let count = crate::runtime::with_click_handlers(&lua, |h| h.len()).unwrap_or(0);
+        assert_eq!(count, 1, "handler should be registered for the buf");
 
         lua.load(r#"buf:on("click", function() return 2 end)"#)
             .exec()
             .unwrap();
-        let count = with_click_handlers(&lua, |h| h.len()).unwrap_or(0);
+        let count = crate::runtime::with_click_handlers(&lua, |h| h.len()).unwrap_or(0);
         assert_eq!(count, 1, "second on() should replace, not accumulate");
+    }
+
+    #[test]
+    fn embed_cycle_errors() {
+        let lua = test_lua();
+        let (a, b) = {
+            let mut store = lua.app_data_mut::<BufferStore>().unwrap();
+            (store.create(), store.create())
+        };
+        lua.globals()
+            .set("a", lua.create_userdata(a).unwrap())
+            .unwrap();
+        lua.globals()
+            .set("b", lua.create_userdata(b).unwrap())
+            .unwrap();
+
+        lua.load("a:embed(b)").exec().unwrap();
+        let err = lua.load("b:embed(a)").exec().unwrap_err().to_string();
+        assert!(err.contains("cycle"), "got: {err}");
     }
 }

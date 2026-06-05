@@ -1,12 +1,11 @@
 use maki_agent::tools::{
-    BASH_TOOL_NAME, BATCH_TOOL_NAME, CODE_EXECUTION_TOOL_NAME, EDIT_TOOL_NAME, GLOB_TOOL_NAME,
-    GREP_TOOL_NAME, MULTIEDIT_TOOL_NAME, QUESTION_TOOL_NAME, READ_TOOL_NAME, TASK_TOOL_NAME,
-    TODOWRITE_TOOL_NAME, WRITE_TOOL_NAME,
+    BASH_TOOL_NAME, CODE_EXECUTION_TOOL_NAME, EDIT_TOOL_NAME, GLOB_TOOL_NAME, GREP_TOOL_NAME,
+    MULTIEDIT_TOOL_NAME, QUESTION_TOOL_NAME, READ_TOOL_NAME, TASK_TOOL_NAME, TODOWRITE_TOOL_NAME,
+    WRITE_TOOL_NAME,
 };
 use maki_agent::{
-    AgentEvent, BatchToolEntry, BatchToolStatus, Envelope, GrepFileEntry, GrepMatchGroup,
-    SubagentInfo, TodoItem, TodoPriority, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput,
-    ToolStartEvent, TurnCompleteEvent,
+    AgentEvent, Envelope, GrepFileEntry, GrepMatchGroup, SubagentInfo, TodoItem, TodoPriority,
+    TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use maki_providers::{Message, TokenUsage};
 
@@ -76,6 +75,8 @@ fn tool_start_with(
         raw_input: None,
         output: None,
         render_header: None,
+        parent_id: None,
+        full_view: false,
     }))
 }
 
@@ -85,6 +86,7 @@ fn tool_done(id: &str, tool: &str, output: ToolOutput, is_error: bool) -> AgentE
         tool: tool.into(),
         output,
         is_error,
+        parent_id: None,
     }))
 }
 
@@ -413,47 +415,11 @@ pub fn mock_events() -> Vec<MockEvent> {
     )));
 
     // Batch - Success
-    events.push(evt(tool_start(
-        "t_batch",
-        BATCH_TOOL_NAME,
-        "Batch (3 tools)",
-        None,
-    )));
+    events.push(evt(tool_start("t_batch", "batch", "Batch (3 tools)", None)));
     events.push(evt(tool_done(
         "t_batch",
-        BATCH_TOOL_NAME,
-        ToolOutput::Batch {
-            entries: vec![
-                BatchToolEntry {
-                    tool: "read".into(),
-                    summary: "src/config/mod.rs".into(),
-                    status: BatchToolStatus::Success,
-                    input: None,
-                    raw_input: None,
-                    output: None,
-                    annotation: None,
-                },
-                BatchToolEntry {
-                    tool: "read".into(),
-                    summary: "src/config/builder.rs".into(),
-                    status: BatchToolStatus::Success,
-                    input: None,
-                    raw_input: None,
-                    output: None,
-                    annotation: None,
-                },
-                BatchToolEntry {
-                    tool: "read".into(),
-                    summary: "src/config/validation.rs".into(),
-                    status: BatchToolStatus::Success,
-                    input: None,
-                    raw_input: None,
-                    output: None,
-                    annotation: None,
-                },
-            ],
-            text: String::new(),
-        },
+        "batch",
+        ToolOutput::Plain("3 tools completed: read src/config/mod.rs, read src/config/builder.rs, read src/config/validation.rs".into()),
         false,
     )));
 

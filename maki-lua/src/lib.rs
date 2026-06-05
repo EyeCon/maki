@@ -4,6 +4,7 @@ pub mod language;
 mod loader;
 pub(crate) mod plugin_permissions;
 mod runtime;
+mod tool_render;
 
 pub use api::command::{
     Anchor, Axis, Border, Dimension, Edge, FloatConfig, FloatConfigPatch, LuaCommandInfo,
@@ -12,7 +13,8 @@ pub use api::command::{
 pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost};
 pub use plugin_permissions::{Permission, PluginPermissions};
-pub use runtime::{ClickReply, RestoreItem, RestoreReply};
+pub use runtime::{RestoreItem, RestoreReply};
+pub use tool_render::{RenderedTool, ToolRenderRequest, ToolRenderer, set_tool_renderer};
 
 pub mod test_support {
     use crate::api::command::{LuaCommandInfo, LuaCommandReader, LuaCommandWriter};

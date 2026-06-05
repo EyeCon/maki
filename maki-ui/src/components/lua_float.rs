@@ -58,6 +58,7 @@ struct FloatWindow {
     config: FloatConfig,
     scroll_offset: usize,
     cached_lines: Arc<Vec<SnapshotLine>>,
+    buf_version: u64,
     /// Locked at the last render. Only [`refresh_layout`] writes here, so
     /// scroll math stays consistent between frames.
     viewport_h: u16,
@@ -176,7 +177,8 @@ impl FloatManager {
         event_tx: flume::Sender<WinEvent>,
         cmd_rx: flume::Receiver<WinCommand>,
     ) {
-        let cached_lines = buf.read_if_dirty().unwrap_or_default();
+        let buf_version = buf.version();
+        let cached_lines = buf.read();
         let id = self.next_id;
         self.next_id += 1;
 
@@ -193,6 +195,7 @@ impl FloatManager {
             config,
             scroll_offset: 0,
             cached_lines,
+            buf_version,
             viewport_h: 1,
             last_content: Rect::default(),
             cursor: 0,
@@ -212,8 +215,10 @@ impl FloatManager {
         let mut closed_ids = Vec::new();
 
         for win in &mut self.windows {
-            if let Some(lines) = win.buf.read_if_dirty() {
-                win.cached_lines = lines;
+            let version = win.buf.version();
+            if version != win.buf_version {
+                win.buf_version = version;
+                win.cached_lines = win.buf.read();
                 win.bring_cursor_into_view();
             }
 
@@ -1429,13 +1434,15 @@ mod tests {
         let lines: Vec<String> = (0..line_count).map(|i| format!("l{i}")).collect();
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         let buf = make_buf(&refs);
-        let cached_lines = buf.read_if_dirty().unwrap_or_default();
+        let buf_version = buf.version();
+        let cached_lines = buf.read();
         FloatWindow {
             id: 0,
             buf,
             config: make_config(),
             scroll_offset: 0,
             cached_lines,
+            buf_version,
             viewport_h: 1,
             last_content: Rect::default(),
             cursor: 0,

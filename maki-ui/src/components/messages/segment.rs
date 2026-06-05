@@ -20,10 +20,6 @@ pub fn instruction_parent(id: &str) -> Option<&str> {
     id.strip_suffix(INST_SUFFIX)
 }
 
-pub fn is_child_segment(id: &str) -> bool {
-    id.contains("__")
-}
-
 #[derive(Clone, Copy, Default)]
 struct CachedHeight {
     at_width: u16,
@@ -48,13 +44,14 @@ pub(super) struct Segment {
     lines: Vec<Line<'static>>,
     pub search_text: String,
     pub tool_id: Option<String>,
+    #[expect(dead_code)]
     pub msg_index: Option<usize>,
     pub truncation: SectionFlags,
     cached_height: Cell<Option<CachedHeight>>,
     pending_highlight: Option<u64>,
     highlight_range: Option<(usize, usize)>,
     highlight_key: HighlightKey,
-    pub spinner_lines: Vec<usize>,
+    pub spinner_lines: Vec<(usize, usize)>,
     pub content_indent: &'static str,
 }
 
@@ -193,6 +190,22 @@ impl Segment {
             self.invalidate_height();
         }
         self.pending_highlight = None;
+    }
+    pub fn visual_row_to_line(&self, visual_row: u32, width: u16) -> u32 {
+        if width == 0 {
+            return visual_row;
+        }
+        let mut cumulative: u32 = 0;
+        for (i, line) in self.lines.iter().enumerate() {
+            let h = Paragraph::new(vec![line.clone()])
+                .wrap(Wrap { trim: false })
+                .line_count(width) as u32;
+            if visual_row < cumulative + h {
+                return i as u32;
+            }
+            cumulative += h;
+        }
+        self.lines.len().saturating_sub(1) as u32
     }
 }
 

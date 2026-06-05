@@ -4,8 +4,7 @@ use crate::components::scrollbar::SCROLLBAR_THUMB;
 use crate::selection::{Selection, SelectionZone};
 use maki_agent::tools::{BASH_TOOL_NAME, GREP_TOOL_NAME, WRITE_TOOL_NAME};
 use maki_agent::{
-    BatchToolEntry, GrepFileEntry, GrepMatchGroup, SnapshotLine, SnapshotSpan, SpanStyle,
-    ToolInput, ToolOutput,
+    GrepFileEntry, GrepMatchGroup, SnapshotLine, SnapshotSpan, SpanStyle, ToolInput, ToolOutput,
 };
 use ratatui::backend::TestBackend;
 use test_case::test_case;
@@ -29,6 +28,8 @@ fn start(id: &str, tool: &str) -> ToolStartEvent {
         raw_input: None,
         output: None,
         render_header: None,
+        parent_id: None,
+        full_view: false,
     }
 }
 
@@ -50,6 +51,7 @@ fn tool_done_updates_start_status(is_error: bool, expected: ToolStatus) {
         tool: "bash".into(),
         output: ToolOutput::Plain("output".into()),
         is_error,
+        parent_id: None,
     });
 
     assert_eq!(panel.messages.len(), 1);
@@ -77,6 +79,7 @@ fn tool_done_sets_annotation(tool: &'static str, output: ToolOutput, expected: O
         tool: tool.into(),
         output,
         is_error: false,
+        parent_id: None,
     });
     assert_eq!(panel.messages[0].annotation.as_deref(), expected);
 }
@@ -93,6 +96,7 @@ fn tool_done_annotation_merge(output: &str, expected: Option<&str>) {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain(output.into()),
         is_error: false,
+        parent_id: None,
     });
     assert_eq!(panel.messages[0].annotation.as_deref(), expected);
 }
@@ -117,6 +121,7 @@ fn tool_done_grep_shows_matches() {
         tool: GREP_TOOL_NAME.into(),
         output: grep_output(2),
         is_error: false,
+        parent_id: None,
     });
     let text = &panel.messages[0].text;
     assert!(!text.contains('\n'), "grep body should not be in msg.text");
@@ -217,6 +222,7 @@ fn unknown_tool_id_is_noop() {
         tool: "bash".into(),
         output: ToolOutput::Plain("output".into()),
         is_error: false,
+        parent_id: None,
     });
     assert!(panel.messages.is_empty());
 }
@@ -231,6 +237,7 @@ fn in_progress_tracking() {
         tool: "bash".into(),
         output: ToolOutput::Plain("ok".into()),
         is_error: false,
+        parent_id: None,
     });
     assert_eq!(panel.in_progress_count(), 1);
 
@@ -239,6 +246,7 @@ fn in_progress_tracking() {
         tool: "read".into(),
         output: ToolOutput::Plain("ok".into()),
         is_error: false,
+        parent_id: None,
     });
     assert_eq!(panel.in_progress_count(), 0);
 }
@@ -304,6 +312,7 @@ fn events_before_cache_built_render_correctly() {
         tool: "bash".into(),
         output: ToolOutput::Plain("result".into()),
         is_error: false,
+        parent_id: None,
     });
     rebuild(&mut panel);
     assert!(seg_text(&panel, "t1").contains("early output"));
@@ -324,6 +333,8 @@ fn bash_code_start(panel: &mut MessagesPanel, id: &str, code: &str) {
         raw_input: None,
         output: None,
         render_header: None,
+        parent_id: None,
+        full_view: false,
     });
 }
 
@@ -341,6 +352,7 @@ fn bash_live_output_with_code_input() {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain("done".into()),
         is_error: false,
+        parent_id: None,
     });
     let text = seg_text(&panel, "t1");
     assert!(text.contains("echo hello") && text.contains("done"));
@@ -356,6 +368,7 @@ fn cancel_in_progress_marks_pending_as_error(cache_built: bool) {
         tool: "bash".into(),
         output: ToolOutput::Plain("ok".into()),
         is_error: false,
+        parent_id: None,
     });
     if cache_built {
         rebuild(&mut panel);
@@ -393,6 +406,7 @@ fn tool_done_after_cancel_in_progress_does_not_underflow() {
         tool: "bash".into(),
         output: ToolOutput::Plain("late".into()),
         is_error: false,
+        parent_id: None,
     });
     assert_eq!(panel.in_progress_count(), 0);
     assert_eq!(msg_status(&panel, "t1"), ToolStatus::Success);
@@ -437,6 +451,7 @@ fn search_text_grep_result_includes_structured_output() {
         tool: "grep".into(),
         output: grep_output(2),
         is_error: false,
+        parent_id: None,
     });
     rebuild(&mut panel);
     let text = seg_search(&panel, "t1");
@@ -457,6 +472,7 @@ fn search_text_diff_output_includes_hunks() {
             summary: "1 edit".into(),
         },
         is_error: false,
+        parent_id: None,
     });
     rebuild(&mut panel);
     let text = seg_search(&panel, "t1");
@@ -472,6 +488,7 @@ fn search_text_bash_with_code_input() {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain("hello".into()),
         is_error: false,
+        parent_id: None,
     });
     rebuild(&mut panel);
     let text = seg_search(&panel, "t1");
@@ -521,98 +538,6 @@ fn update_tool_model_sets_annotation() {
     );
 }
 
-fn batch_entry(tool: &str, summary: &str, status: BatchToolStatus) -> BatchToolEntry {
-    BatchToolEntry {
-        tool: tool.into(),
-        summary: summary.into(),
-        status,
-        input: None,
-        raw_input: None,
-        output: None,
-        annotation: None,
-    }
-}
-
-fn batch_start(panel: &mut MessagesPanel, entries: Vec<BatchToolEntry>) {
-    panel.tool_start(ToolStartEvent {
-        id: "b1".into(),
-        tool: "batch".into(),
-        summary: format!("{} tools", entries.len()),
-        annotation: None,
-        input: None,
-        raw_input: None,
-        output: Some(ToolOutput::Batch {
-            entries,
-            text: String::new(),
-        }),
-        render_header: None,
-    });
-}
-
-fn batch_done(panel: &mut MessagesPanel, entries: Vec<BatchToolEntry>) {
-    panel.tool_done(ToolDoneEvent {
-        id: "b1".into(),
-        tool: "batch".into(),
-        output: ToolOutput::Batch {
-            entries,
-            text: String::new(),
-        },
-        is_error: false,
-    });
-}
-
-fn batch_entries(panel: &MessagesPanel) -> &[BatchToolEntry] {
-    let ToolOutput::Batch { entries, .. } = panel.messages[0].tool_output.as_deref().unwrap()
-    else {
-        panic!("expected Batch");
-    };
-    entries
-}
-
-#[test]
-fn tool_done_batch_preserves_entry_annotations() {
-    let mut panel = MessagesPanel::new(UiConfig::default());
-    batch_start(
-        &mut panel,
-        vec![
-            batch_entry("task", "research", BatchToolStatus::InProgress),
-            batch_entry("read", "file.rs", BatchToolStatus::Pending),
-        ],
-    );
-
-    let model = "anthropic/claude-haiku-4-20250414";
-    panel.update_tool_model("b1__0", model);
-
-    let mut done_entries = vec![
-        batch_entry("task", "research", BatchToolStatus::Success),
-        batch_entry("read", "file.rs", BatchToolStatus::Success),
-    ];
-    done_entries[0].output = Some(ToolOutput::Plain("result".into()));
-    done_entries[1].output = Some(ToolOutput::Plain("contents".into()));
-    batch_done(&mut panel, done_entries);
-
-    let entries = batch_entries(&panel);
-    assert_eq!(entries[0].annotation.as_deref(), Some(model));
-    assert!(entries[1].annotation.is_none());
-}
-
-#[test]
-fn tool_done_batch_preserves_entry_summaries() {
-    let mut panel = MessagesPanel::new(UiConfig::default());
-    batch_start(
-        &mut panel,
-        vec![batch_entry("task", "original", BatchToolStatus::InProgress)],
-    );
-
-    panel.update_tool_summary("b1__0", "renamed by ui");
-
-    let mut done_entries = vec![batch_entry("task", "original", BatchToolStatus::Success)];
-    done_entries[0].output = Some(ToolOutput::Plain("done".into()));
-    batch_done(&mut panel, done_entries);
-
-    assert_eq!(batch_entries(&panel)[0].summary, "renamed by ui");
-}
-
 #[test]
 fn scroll_clamps_to_max_scroll() {
     let mut panel = MessagesPanel::new(UiConfig::default());
@@ -624,20 +549,11 @@ fn scroll_clamps_to_max_scroll() {
     assert_eq!(panel.scroll_top, max);
 }
 
-#[test_case("b1__0",          Some(("b1", 0))   ; "simple")]
-#[test_case("b1__2",          Some(("b1", 2))   ; "higher_index")]
-#[test_case("a__b__1",        Some(("a__b", 1)) ; "nested_separators")]
-#[test_case("no_separator",   None               ; "no_double_underscore")]
-#[test_case("b1__notnum",     None               ; "non_numeric_suffix")]
-fn parse_batch_inner_id_cases(input: &str, expected: Option<(&str, usize)>) {
-    assert_eq!(parse_batch_inner_id(input), expected);
-}
-
 #[test_case("bash", 1, 1 ; "known_tool_creates_message")]
 #[test_case("nonexistent_tool", 1, 1 ; "unknown_tool_accepted")]
 fn tool_pending(tool: &str, expected_msgs: usize, expected_in_progress: usize) {
     let mut panel = MessagesPanel::new(UiConfig::default());
-    panel.tool_pending("t1".into(), tool);
+    panel.tool_pending("t1".into(), tool, None);
     assert_eq!(panel.messages.len(), expected_msgs);
     assert_eq!(panel.in_progress_count(), expected_in_progress);
 }
@@ -645,7 +561,7 @@ fn tool_pending(tool: &str, expected_msgs: usize, expected_in_progress: usize) {
 #[test]
 fn tool_start_upgrades_pending_in_place() {
     let mut panel = MessagesPanel::new(UiConfig::default());
-    panel.tool_pending("t1".into(), "bash");
+    panel.tool_pending("t1".into(), "bash", None);
     assert_eq!(panel.messages.len(), 1);
     assert_eq!(panel.in_progress_count(), 1);
 
@@ -821,12 +737,15 @@ fn panel_with_long_tool(line_count: usize) -> MessagesPanel {
         raw_input: None,
         output: None,
         render_header: None,
+        parent_id: None,
+        full_view: false,
     });
     panel.tool_done(ToolDoneEvent {
         id: "t1".into(),
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain(body),
         is_error: false,
+        parent_id: None,
     });
     render(&mut panel, 80, 24);
     panel
@@ -884,12 +803,15 @@ fn panel_with_grep_tool(match_count: usize) -> MessagesPanel {
         raw_input: None,
         output: None,
         render_header: None,
+        parent_id: None,
+        full_view: false,
     });
     panel.tool_done(ToolDoneEvent {
         id: "t1".into(),
         tool: GREP_TOOL_NAME.into(),
         output: ToolOutput::GrepResult { entries },
         is_error: false,
+        parent_id: None,
     });
     render(&mut panel, 80, 24);
     panel
@@ -947,21 +869,6 @@ fn streaming_with_cached_segments_shows_end_on_auto_scroll() {
 }
 
 #[test]
-fn batch_parent_search_text_excludes_children() {
-    let mut panel = MessagesPanel::new(UiConfig::default());
-    let mut entry = batch_entry("read", "file.rs", BatchToolStatus::Success);
-    entry.output = Some(ToolOutput::Plain("file contents".into()));
-    let entries = vec![entry];
-    batch_start(&mut panel, entries.clone());
-    batch_done(&mut panel, entries);
-    rebuild(&mut panel);
-    let parent = seg_search(&panel, "b1");
-    assert!(!parent.contains("file contents"));
-    let child = seg_search(&panel, "b1__0");
-    assert!(child.contains("file contents"));
-}
-
-#[test]
 fn search_text_includes_truncated_bash_output() {
     let full_output = (0..100)
         .map(|i| format!("line {i}"))
@@ -974,6 +881,7 @@ fn search_text_includes_truncated_bash_output() {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain(full_output.clone()),
         is_error: false,
+        parent_id: None,
     });
     rebuild(&mut panel);
     assert!(seg_search(&panel, "t1").contains(&full_output));
@@ -1010,25 +918,12 @@ fn instruction_segment_has_spacer_before_it() {
         tool: "read".into(),
         output: read_code_with_instructions(instruction_blocks()),
         is_error: false,
+        parent_id: None,
     });
     rebuild(&mut panel);
 
     let inst_id = segment::instruction_id("t1");
     assert!(prev_segment_is_spacer(&panel, &inst_id));
-}
-
-#[test]
-fn batch_instruction_segment_has_no_spacer() {
-    let mut panel = MessagesPanel::new(UiConfig::default());
-    let mut entry = batch_entry("read", "file.rs", BatchToolStatus::Success);
-    entry.output = Some(read_code_with_instructions(instruction_blocks()));
-    let entries = vec![entry];
-    batch_start(&mut panel, entries.clone());
-    batch_done(&mut panel, entries);
-    rebuild(&mut panel);
-
-    let inst_id = segment::instruction_id("b1__0");
-    assert!(!prev_segment_is_spacer(&panel, &inst_id));
 }
 
 fn seg_line_count(panel: &MessagesPanel, tool_id: &str) -> usize {
@@ -1055,6 +950,7 @@ fn toggle_instruction_segment_expands_and_collapses() {
         tool: "read".into(),
         output: read_code_with_instructions(blocks),
         is_error: false,
+        parent_id: None,
     });
     rebuild(&mut panel);
 
@@ -1085,6 +981,7 @@ fn handle_click_returns_lua_tool_click_when_snapshot_exists() {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain("output".into()),
         is_error: false,
+        parent_id: None,
     });
     panel.tool_snapshot(
         "t1",
@@ -1094,8 +991,9 @@ fn handle_click_returns_lua_tool_click_when_snapshot_exists() {
     render(&mut panel, 80, 24);
     let area = Rect::new(0, 0, 80, 24);
     match panel.handle_click(area.y, area) {
-        ClickResult::LuaToolClick { tool_id, .. } => {
+        ClickResult::LuaToolClick { tool_id, row } => {
             assert_eq!(tool_id, "t1");
+            assert_eq!(row, 0);
         }
         other => panic!("expected LuaToolClick, got {other:?}"),
     }
@@ -1127,32 +1025,6 @@ fn handle_click_non_tool_segment_returns_nothing() {
 }
 
 #[test]
-fn handle_click_returns_lua_tool_click_for_batch_child() {
-    let mut panel = MessagesPanel::new(UiConfig::default());
-    batch_start(
-        &mut panel,
-        vec![batch_entry("bash", "echo hi", BatchToolStatus::Success)],
-    );
-    let mut done_entries = vec![batch_entry("bash", "echo hi", BatchToolStatus::Success)];
-    done_entries[0].output = Some(ToolOutput::Plain("hi".into()));
-    batch_done(&mut panel, done_entries);
-
-    panel.tool_snapshot(
-        "b1__0",
-        BufferSnapshot::from_arc(Arc::new(vec![snap_line("rendered")])),
-        None,
-    );
-    render(&mut panel, 80, 24);
-
-    let area = Rect::new(0, 0, 80, 24);
-    let clicked = (0..area.height).find_map(|row| match panel.handle_click(row, area) {
-        ClickResult::LuaToolClick { tool_id, .. } if tool_id == "b1__0" => Some(tool_id),
-        _ => None,
-    });
-    assert_eq!(clicked.as_deref(), Some("b1__0"));
-}
-
-#[test]
 fn tool_done_removes_live_buf_and_snapshots_dirty() {
     let buf = Arc::new(maki_agent::SharedBuf::new());
     buf.set_lines(vec![snap_line("dirty content")]);
@@ -1165,6 +1037,7 @@ fn tool_done_removes_live_buf_and_snapshots_dirty() {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain("output".into()),
         is_error: false,
+        parent_id: None,
     });
 
     let msg = panel.find_tool_msg_mut("t1").unwrap();
@@ -1188,6 +1061,7 @@ fn tool_done_without_live_buf_preserves_existing_snapshot() {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain("output".into()),
         is_error: false,
+        parent_id: None,
     });
 
     let msg = panel.find_tool_msg_mut("t1").unwrap();
@@ -1209,6 +1083,7 @@ fn tool_done_clean_live_buf_does_not_snapshot() {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain("output".into()),
         is_error: false,
+        parent_id: None,
     });
 
     let msg = panel.find_tool_msg_mut("t1").unwrap();
@@ -1222,7 +1097,6 @@ const REQUEST_RECORDED_MSG: &str = "a fired re-bake records the requested genera
 const NOT_RESTAMPED_MSG: &str =
     "the re-bake walk must not optimistically stamp the displayed generation";
 const NO_REQUEST_MSG: &str = "snapshot-free message must not trigger a re-bake request";
-const NO_RESPAM_MSG: &str = "an in-flight re-bake must not be re-requested at the same generation";
 const SUPERSEDED_DROP_MSG: &str =
     "a re-bake reply older than the applied generation must be dropped (monotonic)";
 
@@ -1234,6 +1108,7 @@ fn bash_tool_with_snapshot(id: &str) -> MessagesPanel {
         tool: BASH_TOOL_NAME.into(),
         output: ToolOutput::Plain("output".into()),
         is_error: false,
+        parent_id: None,
     });
     panel.tool_snapshot(
         id,
@@ -1294,72 +1169,17 @@ fn test_event_sender() -> maki_agent::EventSender {
     maki_agent::EventSender::new(tx, 0)
 }
 
-#[test]
-fn rebake_walk_requests_stale_batch_child_once() {
-    let mut panel = MessagesPanel::new(UiConfig::default());
-    batch_start(
-        &mut panel,
-        vec![batch_entry("bash", "echo hi", BatchToolStatus::Success)],
-    );
-    let mut done_entries = vec![batch_entry("bash", "echo hi", BatchToolStatus::Success)];
-    done_entries[0].output = Some(ToolOutput::Plain("hi".into()));
-    done_entries[0].raw_input = Some(serde_json::json!({ "command": "echo hi" }));
-    batch_done(&mut panel, done_entries);
-    panel.tool_snapshot("b1__0", rendered_snapshot(), None);
-
-    panel.set_restore_channel(
-        Some(maki_lua::EventHandle::disconnected_for_test()),
-        Some(test_event_sender()),
-    );
-
-    let baked = panel.snapshot_gen_of("b1__0").unwrap();
-    let next_gen = baked + 1;
-
-    panel.rebake_stale_snapshots(next_gen);
-    assert_eq!(
-        panel.rebake_requested_gen("b1__0"),
-        Some(next_gen),
-        "{REQUEST_RECORDED_MSG}"
-    );
-    assert_eq!(
-        panel.snapshot_gen_of("b1__0"),
-        Some(baked),
-        "{NOT_RESTAMPED_MSG}"
-    );
-
-    panel.rebake_stale_snapshots(next_gen);
-    assert_eq!(
-        panel.rebake_requested_gen("b1__0"),
-        Some(next_gen),
-        "{NO_RESPAM_MSG}"
-    );
-}
-
-const PHANTOM_CHILD_MSG: &str =
-    "a batch-child snapshot for a tool this panel does not own must be ignored, not stored";
-
-#[test]
-fn batch_child_snapshot_for_unknown_parent_is_ignored() {
-    let mut panel = MessagesPanel::new(UiConfig::default());
-    panel.tool_snapshot("missing__0", rendered_snapshot(), None);
-    assert!(
-        panel.snapshot_gen_of("missing__0").is_none(),
-        "{PHANTOM_CHILD_MSG}"
-    );
-}
-
 const RAW_INPUT_SET_MSG: &str = "tool_raw_input must be set from event payload";
 const HEADER_GEN_MSG: &str = "header snapshot must stamp the provided generation";
 const LIVE_PANEL_GEN_MSG: &str = "live snapshot (None gen) must stamp with panel theme_generation";
 const REBAKE_NOOP_MSG: &str = "rebake without channel must be a no-op (no requested gen)";
-const BATCH_RAW_INPUT_MSG: &str = "batch done must propagate raw_input to existing entries";
 
 #[test_case(false ; "fresh_start")]
 #[test_case(true  ; "upgrade_from_pending")]
 fn tool_start_propagates_raw_input(pre_pending: bool) {
     let mut panel = MessagesPanel::new(UiConfig::default());
     if pre_pending {
-        panel.tool_pending("t1".into(), BASH_TOOL_NAME);
+        panel.tool_pending("t1".into(), BASH_TOOL_NAME, None);
     }
     let mut event = start("t1", BASH_TOOL_NAME);
     event.raw_input = Some(serde_json::json!({"command": "echo"}));
@@ -1413,40 +1233,177 @@ fn rebake_without_channel_is_noop() {
     );
 }
 
+const LIVE_BUF_SURVIVES_MSG: &str =
+    "live_buf must survive clean polls so intermittent output keeps streaming";
+const LIVE_BUF_PERSISTS_MSG: &str =
+    "live_buf persists for the panel lifetime; tool_done flushes but does not remove";
+const IS_ANIMATING_SETTLED_MSG: &str =
+    "is_animating must be false once click_done disconnects, even with live_bufs present";
+
 #[test]
-fn batch_done_propagates_raw_input_to_existing_entries() {
+fn poll_live_buf_survives_clean_ticks_for_regular_tool() {
+    let buf = Arc::new(maki_agent::SharedBuf::new());
     let mut panel = MessagesPanel::new(UiConfig::default());
-    batch_start(
-        &mut panel,
-        vec![batch_entry("bash", "echo hi", BatchToolStatus::InProgress)],
+    panel.tool_start(start("t1", BASH_TOOL_NAME));
+    panel.register_live_buf("t1".into(), Arc::clone(&buf));
+
+    buf.append(snap_line("line 1"));
+    render(&mut panel, 80, 24);
+    assert_eq!(
+        panel
+            .find_tool_msg_mut("t1")
+            .unwrap()
+            .render_snapshot
+            .as_ref()
+            .unwrap()
+            .first_line_text(),
+        "line 1",
     );
 
-    let mut done_entries = vec![batch_entry("bash", "echo hi", BatchToolStatus::Success)];
-    done_entries[0].output = Some(ToolOutput::Plain("hi".into()));
-    done_entries[0].raw_input = Some(serde_json::json!({"command": "echo hi"}));
-    batch_done(&mut panel, done_entries);
+    render(&mut panel, 80, 24);
+    render(&mut panel, 80, 24);
+    assert!(
+        panel.live_bufs.contains_key("t1"),
+        "{LIVE_BUF_SURVIVES_MSG}"
+    );
 
-    let entries = batch_entries(&panel);
-    assert!(entries[0].raw_input.is_some(), "{BATCH_RAW_INPUT_MSG}");
-    assert_eq!(
-        entries[0].raw_input.as_ref().unwrap(),
-        &serde_json::json!({"command": "echo hi"}),
-        "{BATCH_RAW_INPUT_MSG}"
+    buf.append(snap_line("line 2"));
+    render(&mut panel, 80, 24);
+    let snap = panel
+        .find_tool_msg_mut("t1")
+        .unwrap()
+        .render_snapshot
+        .as_ref()
+        .unwrap();
+    assert_eq!(snap.lines.len(), 2, "{LIVE_BUF_SURVIVES_MSG}");
+}
+
+#[test]
+fn tool_done_flushes_live_buf_but_keeps_entry() {
+    let buf = Arc::new(maki_agent::SharedBuf::new());
+    let mut panel = MessagesPanel::new(UiConfig::default());
+    panel.tool_start(start("t1", BASH_TOOL_NAME));
+    panel.register_live_buf("t1".into(), Arc::clone(&buf));
+
+    buf.append(snap_line("data"));
+    for _ in 0..10 {
+        render(&mut panel, 80, 24);
+    }
+    assert!(
+        panel.live_bufs.contains_key("t1"),
+        "{LIVE_BUF_PERSISTS_MSG}"
+    );
+
+    panel.tool_done(ToolDoneEvent {
+        id: "t1".into(),
+        tool: BASH_TOOL_NAME.into(),
+        output: ToolOutput::Plain("done".into()),
+        is_error: false,
+        parent_id: None,
+    });
+    assert!(
+        panel.live_bufs.contains_key("t1"),
+        "{LIVE_BUF_PERSISTS_MSG}"
     );
 }
 
 #[test]
-fn header_snapshot_for_batch_child_stamps_gen() {
+fn click_buf_survives_after_handler_finishes() {
     let mut panel = MessagesPanel::new(UiConfig::default());
-    batch_start(
-        &mut panel,
-        vec![batch_entry("bash", "echo hi", BatchToolStatus::Success)],
+    panel.tool_start(start("t1", BASH_TOOL_NAME));
+    panel.tool_done(ToolDoneEvent {
+        id: "t1".into(),
+        tool: BASH_TOOL_NAME.into(),
+        output: ToolOutput::Plain("done".into()),
+        is_error: false,
+        parent_id: None,
+    });
+
+    let buf = Arc::new(maki_agent::SharedBuf::new());
+    buf.append(snap_line("header"));
+    let (done_tx, done_rx) = flume::bounded::<()>(1);
+    panel.register_click_buf("t1".into(), Arc::clone(&buf), done_rx);
+
+    for _ in 0..5 {
+        render(&mut panel, 80, 24);
+    }
+    assert!(
+        panel.live_bufs.contains_key("t1"),
+        "click buf must survive while handler is still running"
     );
-    let mut done_entries = vec![batch_entry("bash", "echo hi", BatchToolStatus::Success)];
-    done_entries[0].output = Some(ToolOutput::Plain("hi".into()));
-    batch_done(&mut panel, done_entries);
 
-    panel.tool_header_snapshot("b1__0", rendered_snapshot(), Some(7));
+    buf.append(snap_line("toggled"));
+    drop(done_tx);
 
-    assert_eq!(panel.snapshot_gen_of("b1__0"), Some(7), "{HEADER_GEN_MSG}");
+    render(&mut panel, 80, 24);
+    assert_eq!(
+        panel
+            .find_tool_msg_mut("t1")
+            .unwrap()
+            .render_snapshot
+            .as_ref()
+            .unwrap()
+            .lines
+            .len(),
+        2,
+    );
+
+    for _ in 0..5 {
+        render(&mut panel, 80, 24);
+    }
+    assert!(
+        panel.live_bufs.contains_key("t1"),
+        "{LIVE_BUF_PERSISTS_MSG}"
+    );
+}
+
+#[test]
+fn write_after_done_disconnect_still_updates_snapshot() {
+    let mut panel = MessagesPanel::new(UiConfig::default());
+    panel.tool_start(start("t1", BASH_TOOL_NAME));
+    panel.tool_done(ToolDoneEvent {
+        id: "t1".into(),
+        tool: BASH_TOOL_NAME.into(),
+        output: ToolOutput::Plain("done".into()),
+        is_error: false,
+        parent_id: None,
+    });
+
+    let buf = Arc::new(maki_agent::SharedBuf::new());
+    let (done_tx, done_rx) = flume::bounded::<()>(1);
+    panel.register_click_buf("t1".into(), Arc::clone(&buf), done_rx);
+    drop(done_tx);
+
+    buf.append(snap_line("late write"));
+    render(&mut panel, 80, 24);
+
+    let snap = panel
+        .find_tool_msg_mut("t1")
+        .unwrap()
+        .render_snapshot
+        .as_ref()
+        .unwrap();
+    assert_eq!(snap.lines.len(), 1);
+    assert_eq!(snap.first_line_text(), "late write");
+}
+
+#[test]
+fn is_animating_false_once_click_done_disconnects() {
+    let mut panel = MessagesPanel::new(UiConfig::default());
+    panel.tool_start(start("t1", BASH_TOOL_NAME));
+    panel.tool_done(ToolDoneEvent {
+        id: "t1".into(),
+        tool: BASH_TOOL_NAME.into(),
+        output: ToolOutput::Plain("done".into()),
+        is_error: false,
+        parent_id: None,
+    });
+
+    let buf = Arc::new(maki_agent::SharedBuf::new());
+    let (done_tx, done_rx) = flume::bounded::<()>(1);
+    panel.register_click_buf("t1".into(), Arc::clone(&buf), done_rx);
+
+    assert!(panel.is_animating(), "animating while handler is running");
+    drop(done_tx);
+    assert!(!panel.is_animating(), "{IS_ANIMATING_SETTLED_MSG}");
 }

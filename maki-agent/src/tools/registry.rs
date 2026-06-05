@@ -143,8 +143,8 @@ pub trait ToolInvocation: Send + Sync {
     fn start_input(&self) -> Option<ToolInputEvent> {
         None
     }
-    fn start_output(&self) -> Option<ToolOutput> {
-        None
+    fn start_output(&self) -> BoxFuture<'_, Option<ToolOutput>> {
+        Box::pin(std::future::ready(None))
     }
     fn mutable_path(&self) -> Option<&Path> {
         None
@@ -164,6 +164,9 @@ pub trait Tool: Send + Sync + 'static {
     }
     fn audience(&self) -> ToolAudience {
         ToolAudience::default()
+    }
+    fn full_view(&self) -> bool {
+        false
     }
     fn parse(&self, input: &Value) -> Result<Box<dyn ToolInvocation>, ParseError>;
 }

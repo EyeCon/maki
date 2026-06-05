@@ -19,8 +19,7 @@ use crate::selection::Selection;
 use crate::theme;
 use maki_agent::tools::{ToolInvocation, ToolRegistry};
 use maki_agent::{
-    AgentEvent, BatchToolStatus, BufferSnapshot, SharedBuf, ToolDoneEvent, ToolOutput,
-    ToolStartEvent,
+    AgentEvent, BufferSnapshot, SharedBuf, ToolDoneEvent, ToolOutput, ToolStartEvent,
 };
 use maki_config::{ToolOutputLines, UiConfig};
 use maki_providers::{ContentBlock, Message, Role, TokenUsage};
@@ -90,7 +89,11 @@ impl Chat {
         match event {
             AgentEvent::ThinkingDelta { text } => self.messages_panel.thinking_delta(&text),
             AgentEvent::TextDelta { text } => self.messages_panel.text_delta(&text),
-            AgentEvent::ToolPending { id, name } => self.messages_panel.tool_pending(id, &name),
+            AgentEvent::ToolPending {
+                id,
+                name,
+                parent_id,
+            } => self.messages_panel.tool_pending(id, &name, parent_id),
             AgentEvent::ToolStart(e) => self.messages_panel.tool_start(*e),
             AgentEvent::ToolOutput { id, content } => {
                 self.messages_panel.tool_output(&id, &content)
@@ -108,15 +111,6 @@ impl Chat {
                     self.messages_panel
                         .push(DisplayMessage::plan(content, pp.display().to_string()));
                 }
-            }
-            AgentEvent::BatchProgress(e) => {
-                self.messages_panel.batch_progress(
-                    &e.batch_id,
-                    e.index,
-                    e.status,
-                    e.output,
-                    e.summary.as_deref(),
-                );
             }
             AgentEvent::TurnComplete(_) => {}
             AgentEvent::ToolResultsSubmitted { .. } => {
@@ -262,6 +256,15 @@ impl Chat {
 
     pub fn register_live_buf(&mut self, id: String, buf: Arc<SharedBuf>) {
         self.messages_panel.register_live_buf(id, buf);
+    }
+
+    pub fn register_click_buf(
+        &mut self,
+        id: String,
+        buf: Arc<SharedBuf>,
+        done: flume::Receiver<()>,
+    ) {
+        self.messages_panel.register_click_buf(id, buf, done);
     }
 
     pub fn stream_reset(&mut self) {
@@ -445,6 +448,7 @@ pub fn history_to_display(
                                     id: id.clone(),
                                     status,
                                     name: static_name.into(),
+                                    parent_id: None,
                                 })),
                                 text,
                                 tool_input: tool_input.map(Arc::new),
@@ -507,26 +511,6 @@ pub(crate) fn restore_item_for(
     })
 }
 
-/// Same idea as `restore_item_for` but for batch children.
-pub(crate) fn restore_item_for_batch_entry(
-    entry: &maki_agent::BatchToolEntry,
-    child_id: String,
-    tool_output_lines: maki_config::ToolOutputLines,
-    theme_gen: u64,
-) -> Option<maki_lua::RestoreItem> {
-    let raw_input = entry.raw_input.clone()?;
-    let output = entry.output.as_ref().map(|o| o.as_text())?;
-    Some(maki_lua::RestoreItem {
-        tool: Arc::from(entry.tool.as_str()),
-        tool_use_id: child_id,
-        output,
-        input: raw_input,
-        is_error: entry.status == BatchToolStatus::Error,
-        tool_output_lines,
-        theme_gen: Some(theme_gen),
-    })
-}
-
 /// Mirrors the live `tool_done` path so loaded tools look the same as streamed ones.
 fn build_loaded_tool(
     tool: &str,
@@ -546,19 +530,6 @@ fn build_loaded_tool(
                 reconstructed.map(Arc::new),
                 annotation,
             )
-        }
-        Some(ToolOutput::Batch { ref entries, .. }) => {
-            let failed = entries
-                .iter()
-                .filter(|e| e.status == BatchToolStatus::Error)
-                .count();
-            let text = if failed > 0 {
-                let total = entries.len();
-                format!("{}/{total} tools succeeded", total - failed)
-            } else {
-                summary.to_owned()
-            };
-            (text, 0, reconstructed.map(Arc::new), None)
         }
         Some(ref output) => {
             let annotation = tool_output_annotation(output);
@@ -615,9 +586,7 @@ fn build_tool_results_map(messages: &[Message]) -> HashMap<&str, (bool, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maki_agent::{
-        AgentEvent, BatchToolEntry, BatchToolStatus, ToolDoneEvent, ToolOutput, ToolStartEvent,
-    };
+    use maki_agent::{AgentEvent, ToolDoneEvent, ToolOutput, ToolStartEvent};
     use maki_config::UiConfig;
     use test_case::test_case;
 
@@ -631,6 +600,8 @@ mod tests {
             raw_input: None,
             output: None,
             render_header: None,
+            parent_id: None,
+            full_view: false,
         }))
     }
 
@@ -640,6 +611,7 @@ mod tests {
             tool: tool.into(),
             output,
             is_error: false,
+            parent_id: None,
         }))
     }
 
@@ -915,42 +887,6 @@ mod tests {
         );
     }
     #[test]
-    fn history_stored_batch_with_errors_shows_count() {
-        let batch_output = ToolOutput::Batch {
-            entries: vec![
-                BatchToolEntry {
-                    tool: "read".into(),
-                    summary: "/a.rs".into(),
-                    status: BatchToolStatus::Success,
-                    input: None,
-                    raw_input: None,
-                    output: None,
-                    annotation: None,
-                },
-                BatchToolEntry {
-                    tool: "read".into(),
-                    summary: "/missing".into(),
-                    status: BatchToolStatus::Error,
-                    input: None,
-                    raw_input: None,
-                    output: None,
-                    annotation: None,
-                },
-            ],
-            text: String::new(),
-        };
-        let msgs = tool_use_pair("batch", serde_json::json!({"tool_calls": []}), "", false);
-        let outputs = HashMap::from([("t1".into(), batch_output)]);
-        let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default(), None);
-        let ToolOutput::Batch { entries, .. } = display[0].tool_output.as_deref().unwrap() else {
-            panic!("expected Batch output");
-        };
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[1].status, BatchToolStatus::Error);
-        assert!(display[0].text.contains("1/2"));
-    }
-
-    #[test]
     fn history_no_stored_output_falls_back_to_plain_text() {
         let msgs = tool_use_pair(
             "read",
@@ -995,6 +931,7 @@ mod tests {
             id: "t1".into(),
             status: ToolStatus::Success,
             name: tool.into(),
+            parent_id: None,
         }));
         msg.tool_raw_input = Some(Arc::new(serde_json::json!({ "q": tool })));
         msg.tool_output = Some(Arc::new(ToolOutput::Plain(RESTORE_OUTPUT.into())));
@@ -1030,99 +967,5 @@ mod tests {
         let mut no_output = tool_msg_with_input("bash");
         no_output.tool_output = None;
         assert!(restore_item_for(&no_output, tol, RESTORE_THEME_GEN).is_none());
-    }
-
-    #[test]
-    fn restore_item_for_batch_entry_round_trips_fields() {
-        const CHILD_ID: &str = "child-123";
-        let entry = BatchToolEntry {
-            tool: "bash".into(),
-            summary: String::new(),
-            status: BatchToolStatus::Error,
-            input: None,
-            raw_input: Some(serde_json::json!({"cmd": "ls"})),
-            output: Some(ToolOutput::Plain("output".into())),
-            annotation: None,
-        };
-        let item = restore_item_for_batch_entry(
-            &entry,
-            CHILD_ID.into(),
-            ToolOutputLines::default(),
-            RESTORE_THEME_GEN,
-        )
-        .expect("entry with raw_input and output must produce a RestoreItem");
-        assert_eq!(&*item.tool, "bash");
-        assert_eq!(item.tool_use_id, CHILD_ID);
-        assert_eq!(item.output, "output");
-        assert_eq!(item.input, serde_json::json!({"cmd": "ls"}));
-        assert!(item.is_error);
-        assert_eq!(item.theme_gen, Some(RESTORE_THEME_GEN));
-    }
-
-    #[test]
-    fn restore_item_for_batch_entry_returns_none_without_raw_input() {
-        let entry = BatchToolEntry {
-            tool: "bash".into(),
-            summary: String::new(),
-            status: BatchToolStatus::Success,
-            input: None,
-            raw_input: None,
-            output: Some(ToolOutput::Plain("output".into())),
-            annotation: None,
-        };
-        assert!(
-            restore_item_for_batch_entry(
-                &entry,
-                "id".into(),
-                ToolOutputLines::default(),
-                RESTORE_THEME_GEN
-            )
-            .is_none(),
-            "missing raw_input must yield None"
-        );
-    }
-
-    #[test]
-    fn restore_item_for_batch_entry_returns_none_without_output() {
-        let entry = BatchToolEntry {
-            tool: "bash".into(),
-            summary: String::new(),
-            status: BatchToolStatus::Success,
-            input: None,
-            raw_input: Some(serde_json::json!({"cmd": "ls"})),
-            output: None,
-            annotation: None,
-        };
-        assert!(
-            restore_item_for_batch_entry(
-                &entry,
-                "id".into(),
-                ToolOutputLines::default(),
-                RESTORE_THEME_GEN
-            )
-            .is_none(),
-            "missing output must yield None"
-        );
-    }
-
-    #[test]
-    fn restore_item_for_batch_entry_success_sets_is_error_false() {
-        let entry = BatchToolEntry {
-            tool: "bash".into(),
-            summary: String::new(),
-            status: BatchToolStatus::Success,
-            input: None,
-            raw_input: Some(serde_json::json!({"cmd": "ls"})),
-            output: Some(ToolOutput::Plain("ok".into())),
-            annotation: None,
-        };
-        let item = restore_item_for_batch_entry(
-            &entry,
-            "id".into(),
-            ToolOutputLines::default(),
-            RESTORE_THEME_GEN,
-        )
-        .expect("valid entry must produce a RestoreItem");
-        assert!(!item.is_error, "success status must set is_error to false");
     }
 }

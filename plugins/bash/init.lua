@@ -239,6 +239,7 @@ maki.api.register_prompt_hint({
 maki.api.register_tool({
   name = "bash",
   description = description,
+  full_view = true,
   schema = {
     type = "object",
     properties = {
@@ -288,6 +289,14 @@ maki.api.register_tool({
   restore = function(input, output, is_error, ctx)
     local command = input.command
     local buf, view = create_bash_view(command, ctx)
+    local summary = input.description or command
+    local workdir = input.workdir
+    if workdir then
+      summary = summary .. " in " .. relative_path(workdir)
+    end
+    local annotation = input.timeout and (maki.ui.humantime(input.timeout) .. " timeout") or nil
+    local status = is_error and "error" or "success"
+    view:set_tool_header("bash", summary, annotation, status)
     local timeout_secs = output:match("^tool bash timed out after (%d+)s$")
     if timeout_secs then
       view:append({ { "Timed out after " .. timeout_secs .. "s", "dim" } })
@@ -335,7 +344,14 @@ maki.api.register_tool({
       command = rewritten
     end
 
+    local summary = input.description or command
+    if workdir then
+      summary = summary .. " in " .. relative_path(workdir)
+    end
+    local annotation = input.timeout and (maki.ui.humantime(input.timeout) .. " timeout") or nil
+
     local buf, view = create_bash_view(command, ctx)
+    view:set_tool_header("bash", summary, annotation, "running")
 
     local output_parts = {}
     local has_output = false
@@ -364,6 +380,7 @@ maki.api.register_tool({
       if is_error then
         view:append({ { "Exit code: " .. exit_code, "dim" } })
       end
+      view:set_tool_header("bash", summary, annotation, is_error and "error" or "success")
       view:finish()
 
       ctx:finish({ llm_output = llm_output, is_error = is_error, body = buf })

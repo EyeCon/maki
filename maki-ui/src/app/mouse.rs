@@ -50,12 +50,8 @@ impl App {
                             let result = self.chats[self.active_chat].handle_click(event.row, area);
                             match result {
                                 ClickResult::LuaToolClick { tool_id, row } => {
-                                    if let Some(handler) = &self.buf_click
-                                        && let Some(reply) = handler(&tool_id, row)
-                                    {
-                                        let chat = &mut self.chats[self.active_chat];
-                                        chat.tool_snapshot(&tool_id, reply.snapshot, None);
-                                        chat.register_live_buf(tool_id, reply.live_buf);
+                                    if let Some(handler) = &self.buf_click {
+                                        handler(&tool_id, row);
                                     }
                                 }
                                 ClickResult::Toggled | ClickResult::Nothing => {}

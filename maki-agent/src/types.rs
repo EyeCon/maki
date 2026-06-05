@@ -1,6 +1,6 @@
 use std::fmt::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use flume::Sender;
@@ -9,7 +9,6 @@ use maki_tool_macro::{ArgEnum, Args};
 use serde::{Deserialize, Serialize};
 
 pub const NO_FILES_FOUND: &str = "No files found";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrepFileEntry {
     pub path: String,
@@ -107,29 +106,6 @@ pub enum ToolInput {
     Script { language: String, code: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum BatchToolStatus {
-    Pending,
-    InProgress,
-    Success,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchToolEntry {
-    pub tool: String,
-    pub summary: String,
-    pub status: BatchToolStatus,
-    pub input: Option<ToolInput>,
-    /// Lua plugins need the full JSON to re-run their snapshot on theme switch.
-    /// `input` only covers code_execution, so this stores the original call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_input: Option<serde_json::Value>,
-    pub output: Option<ToolOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub annotation: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstructionBlock {
     pub path: String,
@@ -178,10 +154,6 @@ pub enum ToolOutput {
 
     GrepResult {
         entries: Vec<GrepFileEntry>,
-    },
-    Batch {
-        entries: Vec<BatchToolEntry>,
-        text: String,
     },
     Instructions {
         blocks: Vec<InstructionBlock>,
@@ -334,7 +306,6 @@ impl ToolOutput {
                 }
                 out
             }
-            Self::Batch { text, .. } => text.clone(),
             Self::Instructions { blocks } => {
                 let mut out = String::new();
                 append_instructions(&mut out, blocks);
@@ -354,6 +325,10 @@ pub struct ToolStartEvent {
     pub input: Option<ToolInput>,
     pub raw_input: Option<serde_json::Value>,
     pub output: Option<ToolOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_view: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -362,6 +337,8 @@ pub struct ToolDoneEvent {
     pub tool: Arc<str>,
     pub output: ToolOutput,
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 const UNKNOWN_TOOL: &str = "unknown";
@@ -373,6 +350,7 @@ impl ToolDoneEvent {
             tool: Arc::from(UNKNOWN_TOOL),
             output: ToolOutput::Plain(message.into()),
             is_error: true,
+            parent_id: None,
         }
     }
 
@@ -416,6 +394,8 @@ pub enum AgentEvent {
     ToolPending {
         id: String,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
     },
     ToolStart(Box<ToolStartEvent>),
     /// `content` is the **full accumulated output** so far, not a delta.
@@ -425,7 +405,6 @@ pub enum AgentEvent {
         content: String,
     },
     ToolDone(Box<ToolDoneEvent>),
-    BatchProgress(Box<BatchProgressEvent>),
     TurnComplete(Box<TurnCompleteEvent>),
     ToolResultsSubmitted {
         message: Box<Message>,
@@ -477,59 +456,287 @@ pub enum AgentEvent {
     },
 }
 
-/// Append-only buffer for streaming tool output to the UI. Writers append
-/// under a Mutex, readers get a cheap Arc clone via `read_if_dirty()`.
+#[derive(Clone)]
+enum BufEntry {
+    Line(SnapshotLine),
+    Embed {
+        buf: Arc<SharedBuf>,
+        indent: String,
+        first_indent: Option<String>,
+    },
+}
+
+#[derive(Default)]
+struct BufInner {
+    entries: Vec<BufEntry>,
+    /// Flattened lines keyed by the aggregate version they were built from.
+    cache: Option<(u64, Arc<Vec<SnapshotLine>>)>,
+}
+
+/// Buffer for streaming tool output to the UI. Holds owned lines and
+/// live embeds of other buffers (by reference): an embedded buffer's
+/// mutations are visible through every buffer that embeds it, so a child's
+/// content has a single source of truth no matter where it is rendered.
+///
+/// Change detection is a monotonic [`version`](Self::version) aggregated
+/// over embeds. Readers keep their own last-seen version cursor, so any
+/// number of readers can poll independently.
 pub struct SharedBuf {
-    committed: Mutex<Arc<Vec<SnapshotLine>>>,
-    dirty: AtomicBool,
+    inner: Mutex<BufInner>,
+    version: AtomicU64,
 }
 
 impl SharedBuf {
     pub fn new() -> Self {
         Self {
-            committed: Mutex::new(Arc::new(Vec::new())),
-            dirty: AtomicBool::new(false),
+            inner: Mutex::new(BufInner::default()),
+            version: AtomicU64::new(0),
         }
     }
 
+    fn lock(&self) -> std::sync::MutexGuard<'_, BufInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn bump(&self, by: u64) {
+        self.version.fetch_add(by, Ordering::Release);
+    }
+
+    /// Monotonic aggregate version: own mutations plus every embedded
+    /// buffer's. Changes whenever flattened content may have changed.
+    pub fn version(&self) -> u64 {
+        let mut v = self.version.load(Ordering::Acquire);
+        let inner = self.lock();
+        for entry in &inner.entries {
+            if let BufEntry::Embed { buf, .. } = entry {
+                v = v.wrapping_add(buf.version());
+            }
+        }
+        v
+    }
+
     pub fn append(&self, line: SnapshotLine) {
-        let mut guard = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        Arc::make_mut(&mut guard).push(line);
-        drop(guard);
-        self.dirty.store(true, Ordering::Release);
+        self.lock().push(BufEntry::Line(line));
+        self.bump(1);
+    }
+
+    pub fn extend(&self, lines: &[SnapshotLine]) {
+        let mut inner = self.lock();
+        for line in lines {
+            inner.push(BufEntry::Line(line.clone()));
+        }
+        drop(inner);
+        self.bump(1);
     }
 
     pub fn set_lines(&self, lines: Vec<SnapshotLine>) {
-        let mut guard = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Arc::new(lines);
-        drop(guard);
-        self.dirty.store(true, Ordering::Release);
+        let mut inner = self.lock();
+        // Absorb the removed embeds' versions so the aggregate stays
+        // monotonic: readers must never see a version they already saw.
+        let absorbed: u64 = inner
+            .entries
+            .iter()
+            .map(|e| match e {
+                BufEntry::Embed { buf, .. } => buf.version(),
+                BufEntry::Line(_) => 0,
+            })
+            .fold(0, u64::wrapping_add);
+        inner.entries = lines.into_iter().map(BufEntry::Line).collect();
+        inner.cache = None;
+        drop(inner);
+        self.bump(absorbed.wrapping_add(1));
     }
 
+    /// Embeds `other` by reference: its current and future content shows up
+    /// in this buffer's flattened lines, each line prefixed with `indent`
+    /// (`first_indent` for the embed's first line, when given).
+    ///
+    /// Returns `false` when embedding would create a cycle.
+    pub fn embed(
+        self: &Arc<Self>,
+        other: &Arc<SharedBuf>,
+        indent: String,
+        first_indent: Option<String>,
+    ) -> bool {
+        if Arc::ptr_eq(self, other) || other.reaches(self) {
+            return false;
+        }
+        self.lock().push(BufEntry::Embed {
+            buf: Arc::clone(other),
+            indent,
+            first_indent,
+        });
+        self.bump(1);
+        true
+    }
+
+    fn reaches(&self, target: &Arc<SharedBuf>) -> bool {
+        let inner = self.lock();
+        inner.entries.iter().any(|e| match e {
+            BufEntry::Embed { buf, .. } => {
+                std::ptr::eq(Arc::as_ptr(buf), Arc::as_ptr(target)) || buf.reaches(target)
+            }
+            BufEntry::Line(_) => false,
+        })
+    }
+
+    /// Atomically replaces all entries with those of `other`, absorbing
+    /// removed embed versions for monotonicity. Returns `false` when the
+    /// swap would create a cycle (any embed in `other` reaches `self`).
+    pub fn assign(self: &Arc<Self>, other: &SharedBuf) -> bool {
+        let new_entries = {
+            let src = other.lock();
+            src.entries.clone()
+        };
+        for entry in &new_entries {
+            if let BufEntry::Embed { buf, .. } = entry
+                && (Arc::ptr_eq(self, buf) || buf.reaches(self))
+            {
+                return false;
+            }
+        }
+        let mut inner = self.lock();
+        let absorbed: u64 = inner
+            .entries
+            .iter()
+            .map(|e| match e {
+                BufEntry::Embed { buf, .. } => buf.version(),
+                BufEntry::Line(_) => 0,
+            })
+            .fold(0, u64::wrapping_add);
+        inner.entries = new_entries;
+        inner.cache = None;
+        drop(inner);
+        self.bump(absorbed.wrapping_add(1));
+        true
+    }
+
+    /// Flattened line count, embeds included.
     pub fn len(&self) -> usize {
-        self.committed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        let inner = self.lock();
+        inner
+            .entries
+            .iter()
+            .map(|e| match e {
+                BufEntry::Line(_) => 1,
+                BufEntry::Embed { buf, .. } => buf.len(),
+            })
+            .sum()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub fn read_if_dirty(&self) -> Option<Arc<Vec<SnapshotLine>>> {
-        if !self.dirty.swap(false, Ordering::AcqRel) {
-            return None;
+    /// Flattened lines with embed indents applied. Cached per aggregate
+    /// version, so repeated reads of an unchanged buffer are O(1).
+    pub fn read(&self) -> Arc<Vec<SnapshotLine>> {
+        let version = self.version();
+        let mut inner = self.lock();
+        if let Some((v, lines)) = &inner.cache
+            && *v == version
+        {
+            return Arc::clone(lines);
         }
-        let guard = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        Some(Arc::clone(&guard))
+        drop(inner);
+        let mut out = Vec::new();
+        self.flatten_into(&mut out, "", "");
+        let lines = Arc::new(out);
+        inner = self.lock();
+        inner.cache = Some((version, Arc::clone(&lines)));
+        lines
+    }
+
+    fn flatten_into(&self, out: &mut Vec<SnapshotLine>, first_prefix: &str, rest_prefix: &str) {
+        let inner = self.lock();
+        let mut first = true;
+        for entry in &inner.entries {
+            let prefix = if first { first_prefix } else { rest_prefix };
+            match entry {
+                BufEntry::Line(line) => {
+                    out.push(prefix_line(line, prefix));
+                    first = false;
+                }
+                BufEntry::Embed {
+                    buf,
+                    indent,
+                    first_indent,
+                } => {
+                    let fp = format!("{prefix}{}", first_indent.as_deref().unwrap_or(indent));
+                    let rp = format!("{rest_prefix}{indent}");
+                    let before = out.len();
+                    buf.flatten_into(out, &fp, &rp);
+                    if out.len() > before {
+                        first = false;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolves a flattened row to the chain of buffers containing it, from
+    /// this buffer (row as given) down to the innermost embed (row local to
+    /// it). Used to route clicks to the handler closest to the content.
+    pub fn locate(self: &Arc<Self>, row: usize) -> Vec<(Arc<SharedBuf>, usize)> {
+        let mut path = vec![(Arc::clone(self), row)];
+        let (mut cur, mut row) = (Arc::clone(self), row);
+        while let Some((child, local)) = cur.child_at(row) {
+            path.push((Arc::clone(&child), local));
+            (cur, row) = (child, local);
+        }
+        path
+    }
+
+    fn child_at(&self, row: usize) -> Option<(Arc<SharedBuf>, usize)> {
+        let inner = self.lock();
+        let mut offset = 0;
+        for entry in &inner.entries {
+            if row < offset {
+                return None;
+            }
+            offset += match entry {
+                BufEntry::Line(_) => 1,
+                BufEntry::Embed { buf, .. } => {
+                    let count = buf.len();
+                    if row < offset + count {
+                        return Some((Arc::clone(buf), row - offset));
+                    }
+                    count
+                }
+            };
+        }
+        None
+    }
+
+    /// Forces readers to see a change even if nothing was written. Used to
+    /// flush click-handler results to pollers when the handler was a no-op.
+    pub fn mark_dirty(&self) {
+        self.bump(1);
     }
 
     pub fn take(&self) -> BufferSnapshot {
-        self.dirty.store(false, Ordering::Release);
-        let guard = self.committed.lock().unwrap_or_else(|e| e.into_inner());
-        BufferSnapshot::from_arc(Arc::clone(&guard))
+        BufferSnapshot::from_arc(self.read())
     }
+}
+
+impl BufInner {
+    fn push(&mut self, entry: BufEntry) {
+        self.entries.push(entry);
+        self.cache = None;
+    }
+}
+
+fn prefix_line(line: &SnapshotLine, prefix: &str) -> SnapshotLine {
+    if prefix.is_empty() {
+        return line.clone();
+    }
+    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(SnapshotSpan {
+        text: prefix.to_owned(),
+        style: SpanStyle::default(),
+    });
+    spans.extend_from_slice(&line.spans);
+    SnapshotLine { spans }
 }
 
 impl Default for SharedBuf {
@@ -606,15 +813,6 @@ pub struct TurnCompleteEvent {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_size: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BatchProgressEvent {
-    pub batch_id: String,
-    pub index: usize,
-    pub status: BatchToolStatus,
-    pub output: Option<ToolOutput>,
-    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -801,12 +999,14 @@ mod tests {
                 tool: Arc::from("bash"),
                 output: ToolOutput::Plain("ok".into()),
                 is_error: false,
+                parent_id: None,
             },
             ToolDoneEvent {
                 id: "t2".into(),
                 tool: Arc::from("read"),
                 output: ToolOutput::Plain("fail".into()),
                 is_error: true,
+                parent_id: None,
             },
         ]);
         assert!(matches!(msg.role, Role::User));
@@ -878,6 +1078,7 @@ mod tests {
                 lines: vec![],
             },
             is_error: false,
+            parent_id: None,
         };
         assert!(ok_event.wrote_to(Path::new("/plans/slug.md")));
         assert!(!ok_event.wrote_to(Path::new("/plans/other.md")));
@@ -932,21 +1133,23 @@ mod tests {
         let buf = SharedBuf::new();
 
         assert!(buf.is_empty());
-        assert!(buf.read_if_dirty().is_none());
+        assert_eq!(buf.version(), 0);
 
         for i in 0..3 {
             buf.append(line(&format!("l{i}")));
         }
         assert_eq!(buf.len(), 3);
 
-        let snap = buf.read_if_dirty().expect("dirty after appends");
+        let v = buf.version();
+        assert_ne!(v, 0, "version changes after appends");
+        let snap = buf.read();
         assert_eq!(snap.len(), 3);
         assert_eq!(snap[0].spans[0].text, "l0");
-        assert!(buf.read_if_dirty().is_none(), "clean after read");
+        assert_eq!(buf.version(), v, "reading does not change the version");
 
         buf.append(line("l3"));
-        let _ = buf.take();
-        assert!(buf.read_if_dirty().is_none(), "take clears dirty");
+        assert_ne!(buf.version(), v);
+        assert_eq!(buf.take().lines.len(), 4);
     }
 
     #[test]
@@ -954,11 +1157,10 @@ mod tests {
         let buf = SharedBuf::new();
         buf.append(line("a"));
         buf.append(line("b"));
-        let snap = buf.read_if_dirty().unwrap();
+        let snap = buf.read();
         buf.append(line("c"));
         assert_eq!(snap.len(), 2, "held Arc must not see new appends");
-        let snap2 = buf.read_if_dirty().unwrap();
-        assert_eq!(snap2.len(), 3);
+        assert_eq!(buf.read().len(), 3);
     }
 
     #[test]
@@ -966,7 +1168,7 @@ mod tests {
         let buf = Arc::new(SharedBuf::new());
         let buf2 = Arc::clone(&buf);
         let h = std::thread::spawn(move || {
-            let _guard = buf2.committed.lock().unwrap();
+            let _guard = buf2.inner.lock().unwrap();
             panic!("intentional poison");
         });
         let _ = h.join();
@@ -1026,52 +1228,6 @@ mod tests {
     }
 
     #[test]
-    fn batch_tool_entry_raw_input_serde_round_trip() {
-        const MSG: &str = "raw_input should survive serde round-trip";
-        let entry = BatchToolEntry {
-            tool: "read".into(),
-            summary: "read a file".into(),
-            status: BatchToolStatus::Success,
-            input: None,
-            raw_input: Some(serde_json::json!({"path": "/a.rs"})),
-            output: None,
-            annotation: None,
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        let parsed: BatchToolEntry = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed.raw_input,
-            Some(serde_json::json!({"path": "/a.rs"})),
-            "{MSG}"
-        );
-    }
-
-    #[test]
-    fn batch_tool_entry_raw_input_none_omitted_in_json() {
-        const MSG: &str = "raw_input: None must not appear in serialized JSON";
-        let entry = BatchToolEntry {
-            tool: "bash".into(),
-            summary: "run cmd".into(),
-            status: BatchToolStatus::Pending,
-            input: None,
-            raw_input: None,
-            output: None,
-            annotation: None,
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(!json.contains("raw_input"), "{MSG}");
-    }
-
-    #[test]
-    fn batch_tool_entry_missing_raw_input_deserializes_as_none() {
-        const MSG: &str = "missing raw_input field must deserialize as None (backwards compat)";
-        let json =
-            r#"{"tool":"grep","summary":"search","status":"Pending","input":null,"output":null}"#;
-        let entry: BatchToolEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.raw_input, None, "{MSG}");
-    }
-
-    #[test]
     fn agent_event_tool_snapshot_theme_gen_backwards_compat() {
         const OMIT_MSG: &str = "theme_gen: None must not appear in serialized JSON";
         const COMPAT_MSG: &str = "missing theme_gen must deserialize as None (backwards compat)";
@@ -1096,5 +1252,171 @@ mod tests {
         let json_without = r#"{"id":"t1"}"#;
         let parsed: ToolSnapshotFields = serde_json::from_str(json_without).unwrap();
         assert_eq!(parsed.theme_gen, None, "{COMPAT_MSG}");
+    }
+
+    #[test]
+    fn embed_reflects_later_child_writes() {
+        let parent = Arc::new(SharedBuf::new());
+        let child = Arc::new(SharedBuf::new());
+        parent.append(line("header"));
+        assert!(parent.embed(&child, "  ".into(), None));
+
+        let v = parent.version();
+        child.append(line("body"));
+        assert_ne!(parent.version(), v, "child write must bump parent version");
+
+        let snap = parent.read();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[1].spans[0].text, "  ");
+        assert_eq!(snap[1].spans[1].text, "body");
+    }
+
+    #[test]
+    fn embed_first_indent_applies_to_first_line_only() {
+        let parent = Arc::new(SharedBuf::new());
+        let child = Arc::new(SharedBuf::new());
+        child.append(line("first"));
+        child.append(line("rest"));
+        assert!(parent.embed(&child, "    ".into(), Some("  ".into())));
+
+        let snap = parent.read();
+        assert_eq!(snap[0].spans[0].text, "  ");
+        assert_eq!(snap[1].spans[0].text, "    ");
+    }
+
+    #[test]
+    fn embed_indents_compose_across_nesting() {
+        let root = Arc::new(SharedBuf::new());
+        let slot = Arc::new(SharedBuf::new());
+        let body = Arc::new(SharedBuf::new());
+        body.append(line("deep"));
+        assert!(slot.embed(&body, "..".into(), None));
+        assert!(root.embed(&slot, "--".into(), None));
+
+        let snap = root.read();
+        assert_eq!(snap[0].spans[0].text, "--..");
+        assert_eq!(snap[0].spans[1].text, "deep");
+    }
+
+    #[test]
+    fn embed_rejects_cycles() {
+        let a = Arc::new(SharedBuf::new());
+        let b = Arc::new(SharedBuf::new());
+        assert!(a.embed(&b, String::new(), None));
+        assert!(!b.embed(&a, String::new(), None), "direct cycle");
+        assert!(!a.embed(&a, String::new(), None), "self cycle");
+    }
+
+    #[test]
+    fn set_lines_keeps_version_monotonic_after_dropping_embeds() {
+        let parent = Arc::new(SharedBuf::new());
+        let child = Arc::new(SharedBuf::new());
+        for _ in 0..10 {
+            child.append(line("x"));
+        }
+        assert!(parent.embed(&child, String::new(), None));
+        let before = parent.version();
+        parent.set_lines(vec![line("flat")]);
+        assert!(
+            parent.version() > before,
+            "dropping a versioned embed must not rewind the aggregate"
+        );
+    }
+
+    #[test]
+    fn locate_resolves_innermost_buffer_and_local_row() {
+        let root = Arc::new(SharedBuf::new());
+        let slot = Arc::new(SharedBuf::new());
+        let body = Arc::new(SharedBuf::new());
+        body.append(line("b0"));
+        body.append(line("b1"));
+        slot.append(line("slot header"));
+        assert!(slot.embed(&body, "  ".into(), None));
+        root.append(line("root header"));
+        assert!(root.embed(&slot, String::new(), None));
+
+        // row 3 = root[0], slot[0]=header, body[0], body[1]
+        let path = root.locate(3);
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[1].1, 2, "row local to slot");
+        assert_eq!(path[2].1, 1, "row local to body");
+        assert!(Arc::ptr_eq(&path[2].0, &body));
+
+        let header_path = root.locate(0);
+        assert_eq!(header_path.len(), 1, "own line resolves to self only");
+    }
+
+    #[test]
+    fn len_counts_embedded_lines() {
+        let parent = Arc::new(SharedBuf::new());
+        let child = Arc::new(SharedBuf::new());
+        child.append(line("a"));
+        child.append(line("b"));
+        parent.append(line("h"));
+        assert!(parent.embed(&child, String::new(), None));
+        assert_eq!(parent.len(), 3);
+    }
+
+    #[test]
+    fn assign_replaces_entries_atomically() {
+        let dst = Arc::new(SharedBuf::new());
+        dst.append(line("old"));
+        let v_before = dst.version();
+
+        let src = SharedBuf::new();
+        src.append(line("new1"));
+        src.append(line("new2"));
+
+        assert!(dst.assign(&src));
+        assert!(dst.version() > v_before);
+        let lines = dst.read();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].text, "new1");
+    }
+
+    #[test]
+    fn assign_preserves_embeds() {
+        let dst = Arc::new(SharedBuf::new());
+        let child = Arc::new(SharedBuf::new());
+        child.append(line("child"));
+
+        let tmp = Arc::new(SharedBuf::new());
+        tmp.append(line("header"));
+        assert!(tmp.embed(&child, String::new(), None));
+
+        assert!(dst.assign(&tmp));
+        let lines = dst.read();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].spans[0].text, "child");
+    }
+
+    #[test]
+    fn assign_rejects_cycles() {
+        let a = Arc::new(SharedBuf::new());
+        a.append(line("a"));
+
+        let src = Arc::new(SharedBuf::new());
+        assert!(src.embed(&a, String::new(), None));
+
+        assert!(!a.assign(&src), "assigning embed of self must be rejected");
+    }
+
+    #[test]
+    fn assign_version_stays_monotonic() {
+        let dst = Arc::new(SharedBuf::new());
+        let child = Arc::new(SharedBuf::new());
+        for _ in 0..10 {
+            child.append(line("x"));
+        }
+        assert!(dst.embed(&child, String::new(), None));
+        let before = dst.version();
+
+        let src = SharedBuf::new();
+        src.append(line("flat"));
+        assert!(dst.assign(&src));
+        assert!(
+            dst.version() > before,
+            "dropping a versioned embed via assign must not rewind"
+        );
     }
 }

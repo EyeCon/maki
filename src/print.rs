@@ -213,7 +213,6 @@ pub fn run(
             | AgentEvent::ToolStart(_)
             | AgentEvent::ToolOutput { .. }
             | AgentEvent::ToolDone(_)
-            | AgentEvent::BatchProgress(_)
             | AgentEvent::QueueItemConsumed { .. }
             | AgentEvent::AutoCompacting
             | AgentEvent::AuthRequired

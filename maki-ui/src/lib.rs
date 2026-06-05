@@ -42,6 +42,7 @@ pub fn run(
     params: EventLoopParams,
     initial_prompt: Option<String>,
 ) -> Result<(Option<String>, i32)> {
+    components::lua_render::register_tool_renderer();
     let (_guard, mut terminal) = terminal::TerminalGuard::init()?;
     let el = event_loop::EventLoop::new(&mut terminal, params)?;
     el.run(initial_prompt)

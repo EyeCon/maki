@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use humantime::format_duration;
@@ -8,7 +9,7 @@ use crate::api::command::{
     Anchor, Border, Dimension, FloatConfig, Split, TitlePos, UiAction, WinCommand, WinEvent,
 };
 use crate::api::win::WinHandle;
-use crate::runtime::with_task_bufs;
+use crate::runtime::{register_tool_root, with_live_ctx, with_task_bufs};
 
 pub(crate) fn parse_footer(tbl: &Table) -> LuaResult<Vec<(String, String)>> {
     let footer_tbl: Table = match tbl.get("footer") {
@@ -31,7 +32,22 @@ pub(crate) fn create_ui_table(
     let t = lua.create_table()?;
     t.set(
         "buf",
-        lua.create_function(|lua, ()| Ok(with_task_bufs(lua, |store| store.create_live())))?,
+        lua.create_function(|lua, ()| {
+            let (handle, is_first) = with_task_bufs(lua, |store| {
+                let first = store.live_buf().is_none();
+                (store.create_live(), first)
+            });
+            if is_first {
+                with_live_ctx(lua, |live| {
+                    register_tool_root(lua, &live.tool_use_id, &handle.buf);
+                    let _ = live.event_tx.send(maki_agent::AgentEvent::LiveToolBuf {
+                        id: live.tool_use_id.clone(),
+                        body: Arc::clone(&handle.buf),
+                    });
+                });
+            }
+            Ok(handle)
+        })?,
     )?;
     t.set(
         "highlight",

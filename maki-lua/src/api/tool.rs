@@ -3,14 +3,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flume::Sender;
+use maki_agent::agent::tool_dispatch::{self, Emit};
 use maki_agent::prompt::{PromptId, Slot};
 use maki_agent::tools::Tool;
+use maki_agent::tools::ToolRegistry;
 use maki_agent::tools::schema::{ParamSchema, to_json_schema, try_from_json, validate};
 use maki_agent::tools::{
     BoxFuture, Deadline, DescriptionContext, ExecFuture, HeaderFuture, HeaderResult, ParseError,
     PermissionScopes, ToolAudience, ToolContext, ToolInvocation,
 };
-use maki_agent::{AgentEvent, BufferSnapshot, SharedBuf, ToolOutput};
+use maki_agent::{AgentEvent, BufferSnapshot, Envelope, EventSender, SharedBuf, ToolOutput};
 use mlua::{
     Function, Lua, LuaSerdeExt, RegistryKey, Result as LuaResult, Table, Value as LuaValue,
 };
@@ -21,12 +23,43 @@ use crate::api::command::{
     CommandEntry, CommandHandlerMap, LuaCommandWriter, publish_command_snapshot,
 };
 use crate::api::ctx::LuaCtx;
-use crate::runtime::{HintContent, LiveCtx, PromptHintCallbacks, PromptHintRegistration, Request};
+use crate::runtime::{
+    ChildRecord, HintContent, LiveCtx, PromptHintCallbacks, PromptHintRegistration, Request,
+    active_task, lock_cell, with_child_records, with_live_ctx,
+};
+use crate::tool_render::{ToolRenderRequest, tool_renderer};
 
 const TOOL_NAME_MAX: usize = 64;
 const TOOL_HANDLER_RETURN_ERR: &str =
     "tool handler must return string or {output=string, is_error?=bool}";
 const TIMEOUT_PARSE_ERR: &str = "register_tool: 'timeout' must be a positive number, 0, or false";
+const DEFAULT_CHILD_OUTPUT_LINES: usize = 5;
+
+fn join_annotations(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(a), Some(b)) => Some(format!("{a} \u{b7} {b}")),
+        (a, b) => a.or(b),
+    }
+}
+
+pub(crate) struct ToolDispatchRequest {
+    pub name: String,
+    pub params: Value,
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub reply: flume::Sender<ToolDispatchReply>,
+    pub live_buf_tx: Option<flume::Sender<Arc<SharedBuf>>>,
+}
+
+pub(crate) struct ToolDispatchReply {
+    pub text: String,
+    pub is_error: bool,
+    pub tool: String,
+    pub summary: String,
+    pub output: ToolOutput,
+    pub raw_input: Value,
+    pub body_buf: Option<Arc<SharedBuf>>,
+}
 
 #[derive(Clone)]
 pub(crate) enum PermissionScopeKind {
@@ -41,10 +74,12 @@ pub(crate) struct PendingTool {
     pub(crate) audience: ToolAudience,
     pub(crate) handler_key: RegistryKey,
     pub(crate) header_key: Option<RegistryKey>,
+    pub(crate) start_output_key: Option<RegistryKey>,
     pub(crate) restore_key: Option<RegistryKey>,
     pub(crate) permission_scope_kind: Option<PermissionScopeKind>,
     pub(crate) permission_scopes_key: Option<RegistryKey>,
     pub(crate) timeout: Option<Duration>,
+    pub(crate) full_view: bool,
 }
 
 pub(crate) type PendingTools = Arc<Mutex<Vec<PendingTool>>>;
@@ -57,8 +92,10 @@ pub(crate) struct LuaTool {
     pub(crate) tx: Sender<Request>,
     pub(crate) plugin: Arc<str>,
     pub(crate) has_header_fn: bool,
+    pub(crate) has_start_output_fn: bool,
     pub(crate) permission_scope_kind: Option<PermissionScopeKind>,
     pub(crate) timeout: Option<Duration>,
+    pub(crate) full_view: bool,
 }
 
 impl Tool for LuaTool {
@@ -78,6 +115,10 @@ impl Tool for LuaTool {
         self.audience
     }
 
+    fn full_view(&self) -> bool {
+        self.full_view
+    }
+
     fn parse(&self, input: &Value) -> Result<Box<dyn ToolInvocation>, ParseError> {
         let validated = validate(self.schema, input.clone())?;
         let permission_state = match &self.permission_scope_kind {
@@ -95,6 +136,7 @@ impl Tool for LuaTool {
             tool: Arc::clone(&self.name),
             plugin: Arc::clone(&self.plugin),
             has_header_fn: self.has_header_fn,
+            has_start_output_fn: self.has_start_output_fn,
             input: validated,
             tx: self.tx.clone(),
             permission_state,
@@ -112,6 +154,7 @@ struct LuaToolInvocation {
     tool: Arc<str>,
     plugin: Arc<str>,
     has_header_fn: bool,
+    has_start_output_fn: bool,
     input: Value,
     tx: Sender<Request>,
     permission_state: PermissionState,
@@ -183,6 +226,31 @@ impl ToolInvocation for LuaToolInvocation {
         }
     }
 
+    fn start_output(&self) -> BoxFuture<'_, Option<ToolOutput>> {
+        if !self.has_start_output_fn {
+            return Box::pin(std::future::ready(None));
+        }
+        let (reply_tx, reply_rx) = flume::bounded::<Option<ToolOutput>>(1);
+        let tx = self.tx.clone();
+        let plugin = Arc::clone(&self.plugin);
+        let tool = Arc::clone(&self.tool);
+        let input = self.input.clone();
+        Box::pin(async move {
+            let sent = tx
+                .send_async(Request::ComputeStartOutput {
+                    plugin,
+                    tool,
+                    input,
+                    reply: reply_tx,
+                })
+                .await;
+            if sent.is_err() {
+                return None;
+            }
+            reply_rx.recv_async().await.unwrap_or(None)
+        })
+    }
+
     fn execute<'a>(self: Box<Self>, ctx: &'a ToolContext) -> ExecFuture<'a> {
         let deadline = ctx.deadline;
         let plugin = self.plugin;
@@ -210,6 +278,7 @@ impl ToolInvocation for LuaToolInvocation {
                 config: ctx.config.clone(),
                 tool_output_lines: ctx.tool_output_lines,
                 finish_tx: None,
+                tool_use_id: ctx.tool_use_id.clone(),
             };
 
             tx.send_async(Request::CallTool {
@@ -223,6 +292,7 @@ impl ToolInvocation for LuaToolInvocation {
                 },
                 reply: reply_tx,
                 live,
+                tool_ctx: Arc::new(ctx.clone()),
             })
             .await
             .map_err(|_| "lua thread disconnected".to_string())?;
@@ -262,14 +332,133 @@ impl ToolInvocation for LuaToolInvocation {
                         .emit(id, None, &ctx.event_tx);
                     }
                     let format = reply.format;
-                    reply.result.map(|s| match format {
-                        LuaOutputFormat::Markdown => ToolOutput::Markdown(s),
-                        LuaOutputFormat::Plain => ToolOutput::Plain(s),
+                    reply.result.map(|text| match format {
+                        LuaOutputFormat::Markdown => ToolOutput::Markdown(text),
+                        LuaOutputFormat::Plain => ToolOutput::Plain(text),
                     })
                 }
             }
         })
     }
+}
+
+fn spawn_dispatch_loop(ctx: &ToolContext) -> flume::Sender<ToolDispatchRequest> {
+    let (tx, rx) = flume::unbounded::<ToolDispatchRequest>();
+    let cancel = ctx.cancel.clone();
+    let ctx = ctx.clone();
+    smol::spawn(async move {
+        loop {
+            let req = futures_lite::future::race(async { rx.recv_async().await.ok() }, async {
+                cancel.cancelled().await;
+                None
+            })
+            .await;
+            let Some(req) = req else { break };
+            if cancel.is_cancelled() {
+                let _ = req.reply.send(ToolDispatchReply {
+                    text: "cancelled".into(),
+                    is_error: true,
+                    tool: req.name,
+                    summary: String::new(),
+                    output: ToolOutput::Plain("cancelled".into()),
+                    raw_input: req.params,
+                    body_buf: None,
+                });
+                continue;
+            }
+            let ctx = ctx.clone();
+            smol::spawn(async move {
+                let summary = ToolRegistry::native()
+                    .resolve_header_async(&req.name, &req.params)
+                    .await;
+
+                let is_child = req.parent_id.is_some();
+                let live_buf_tx = req.live_buf_tx;
+                let (child_event_tx, cap_rx) = if is_child {
+                    let (cap_tx, cap_rx) = flume::unbounded::<Envelope>();
+                    let cap_event_tx = EventSender::new(cap_tx, ctx.event_tx.run_id());
+                    (Some(cap_event_tx), Some(cap_rx))
+                } else {
+                    (None, None)
+                };
+
+                let effective_event_tx = child_event_tx.as_ref().unwrap_or(&ctx.event_tx);
+
+                let inner_ctx = ToolContext {
+                    tool_use_id: Some(req.id.clone()),
+                    event_tx: effective_event_tx.clone(),
+                    ..ctx.clone()
+                };
+
+                let has_live_forward = is_child && live_buf_tx.is_some();
+                let live_fwd_tx = live_buf_tx.clone();
+                let drain_handle = if has_live_forward {
+                    let cap_rx = cap_rx.as_ref().unwrap().clone();
+                    Some(smol::spawn(async move {
+                        let mut buf = None;
+                        while let Ok(envelope) = cap_rx.recv_async().await {
+                            if let AgentEvent::LiveToolBuf { body, .. } = envelope.event {
+                                if let Some(ref tx) = live_fwd_tx {
+                                    let _ = tx.send(Arc::clone(&body));
+                                }
+                                buf = Some(body);
+                            }
+                        }
+                        buf
+                    }))
+                } else {
+                    None
+                };
+
+                let mut done = tool_dispatch::run(
+                    ToolRegistry::native(),
+                    inner_ctx.mcp.as_ref(),
+                    req.id,
+                    &req.name,
+                    &req.params,
+                    &inner_ctx,
+                    Emit::Silent,
+                )
+                .await;
+
+                drop(child_event_tx);
+                drop(inner_ctx);
+
+                let body_buf = if let Some(handle) = drain_handle {
+                    handle.await
+                } else if let Some(cap_rx) = cap_rx {
+                    let mut buf = None;
+                    for envelope in cap_rx.try_iter() {
+                        if let AgentEvent::LiveToolBuf { body, .. } = envelope.event {
+                            buf = Some(body);
+                        }
+                    }
+                    buf
+                } else {
+                    None
+                };
+
+                if !is_child {
+                    done.parent_id = req.parent_id;
+                    ctx.event_tx
+                        .try_send(AgentEvent::ToolDone(Box::new(done.clone())));
+                }
+
+                let _ = req.reply.send(ToolDispatchReply {
+                    text: done.output.as_text(),
+                    is_error: done.is_error,
+                    tool: done.tool.to_string(),
+                    summary,
+                    output: done.output,
+                    raw_input: req.params,
+                    body_buf,
+                });
+            })
+            .detach();
+        }
+    })
+    .detach();
+    tx
 }
 
 pub(crate) fn create_api_table(
@@ -355,6 +544,238 @@ pub(crate) fn create_api_table(
         lua.create_function(move |lua, spec: Table| {
             register_command_from_lua(lua, &spec, Arc::clone(&plugin))
         })?,
+    )?;
+
+    t.set(
+        "call_tool",
+        lua.create_async_function(
+            |lua, (name, params, opts): (String, LuaValue, Option<Table>)| async move {
+                let dispatch_ctx = {
+                    let handle = active_task(&lua);
+                    let cell = lock_cell(&handle);
+                    let dctx = cell
+                        .dispatch_ctx
+                        .as_ref()
+                        .ok_or_else(|| mlua::Error::runtime("call_tool: no tool context"))?;
+                    let dctx = Arc::clone(dctx);
+                    drop(cell);
+                    {
+                        let mut dispatch_guard = dctx.dispatch.lock().unwrap();
+                        if dispatch_guard.is_none() {
+                            *dispatch_guard = Some(spawn_dispatch_loop(&dctx.tool_ctx));
+                        }
+                    }
+                    dctx
+                };
+
+                let (id, parent_id, on_output_key) = match opts {
+                    Some(ref o) => {
+                        let on_output: Option<Function> = o.get("on_output").ok();
+                        let key = on_output
+                            .map(|f| lua.create_registry_value(f))
+                            .transpose()?;
+                        (
+                            o.get::<String>("id").unwrap_or_default(),
+                            o.get::<String>("parent_id").ok(),
+                            key,
+                        )
+                    }
+                    None => (String::new(), None, None),
+                };
+                let params_json: Value = lua.from_value(params)?;
+
+                let (live_buf_tx, live_buf_rx) = if on_output_key.is_some() {
+                    let (tx, rx) = flume::bounded::<Arc<SharedBuf>>(1);
+                    (Some(tx), Some(rx))
+                } else {
+                    (None, None)
+                };
+
+                let (reply_tx, reply_rx) = flume::bounded(1);
+                dispatch_ctx
+                    .dispatch
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .send(ToolDispatchRequest {
+                        name,
+                        params: params_json,
+                        id: id.clone(),
+                        parent_id,
+                        reply: reply_tx,
+                        live_buf_tx,
+                    })
+                    .map_err(|_| mlua::Error::runtime("dispatch channel closed"))?;
+
+                let reply = if let (Some(on_output_key), Some(live_buf_rx)) =
+                    (on_output_key.as_ref(), live_buf_rx)
+                {
+                    // Embeds are live references, so content updates flow to
+                    // the parent automatically; the callback only needs to
+                    // announce the child's buffer when it first appears.
+                    enum Step {
+                        Reply(Result<Box<ToolDispatchReply>, flume::RecvError>),
+                        Buf(Result<Arc<SharedBuf>, flume::RecvError>),
+                    }
+                    loop {
+                        let step = futures_lite::future::race(
+                            async { Step::Reply(reply_rx.recv_async().await.map(Box::new)) },
+                            async { Step::Buf(live_buf_rx.recv_async().await) },
+                        )
+                        .await;
+                        match step {
+                            Step::Reply(r) => {
+                                break *r.map_err(|_| {
+                                    mlua::Error::runtime("dispatch reply channel closed")
+                                })?;
+                            }
+                            Step::Buf(Ok(buf)) => {
+                                let cb: Function = lua.registry_value(on_output_key)?;
+                                cb.call::<()>(BufHandle { id: 0, buf })?;
+                            }
+                            Step::Buf(Err(_)) => {
+                                break reply_rx.recv_async().await.map_err(|_| {
+                                    mlua::Error::runtime("dispatch reply channel closed")
+                                })?;
+                            }
+                        }
+                    }
+                } else {
+                    reply_rx
+                        .recv_async()
+                        .await
+                        .map_err(|_| mlua::Error::runtime("dispatch reply channel closed"))?
+                };
+
+                if let Some(key) = on_output_key {
+                    let _ = lua.remove_registry_value(key);
+                }
+
+                if !id.is_empty() {
+                    with_child_records(&lua, |records| {
+                        records.insert(
+                            id.clone(),
+                            ChildRecord {
+                                tool: reply.tool.clone(),
+                                raw_input: reply.raw_input.clone(),
+                                output: reply.output.clone(),
+                            },
+                        );
+                    });
+                }
+
+                let result = lua.create_table()?;
+                result.set("output", reply.text)?;
+                result.set("is_error", reply.is_error)?;
+                result.set("tool", reply.tool)?;
+                result.set("summary", reply.summary)?;
+                if let Some(buf) = reply.body_buf {
+                    result.set("body", BufHandle { id: 0, buf })?;
+                }
+                Ok(result)
+            },
+        )?,
+    )?;
+
+    t.set(
+        "emit_tool_pending",
+        lua.create_function(
+            |lua, (id, tool_name, opts): (String, String, Option<Table>)| {
+                let parent_id = opts.and_then(|o| o.get::<String>("parent_id").ok());
+                with_live_ctx(lua, |live| {
+                    live.event_tx.try_send(AgentEvent::ToolPending {
+                        id: id.clone(),
+                        name: tool_name.clone(),
+                        parent_id: parent_id.clone(),
+                    });
+                });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    t.set(
+        "fire_click",
+        lua.create_async_function(|lua, (tool_id, row): (String, u32)| async move {
+            let Some(resolved) = crate::runtime::resolve_click(&lua, &tool_id, row) else {
+                return Ok(false);
+            };
+            let data = lua.create_table()?;
+            data.set("row", resolved.row)?;
+            resolved.func.call_async::<()>(data).await?;
+            Ok(true)
+        })?,
+    )?;
+
+    t.set(
+        "tool_full_view",
+        lua.create_function(|_lua, name: String| {
+            let full_view = ToolRegistry::native()
+                .get(&name)
+                .map(|t| t.tool.full_view())
+                .unwrap_or(false);
+            Ok(full_view)
+        })?,
+    )?;
+
+    t.set(
+        "render_child_output",
+        lua.create_async_function(
+            |lua, (child_id, opts): (String, Option<Table>)| async move {
+                let Some(renderer) = tool_renderer() else {
+                    return Ok(LuaValue::Nil);
+                };
+                let (output_limit, expanded, highlight) = match opts {
+                    Some(o) => (
+                        o.get::<usize>("output_limit")
+                            .unwrap_or(DEFAULT_CHILD_OUTPUT_LINES),
+                        o.get::<bool>("expanded").unwrap_or(false),
+                        o.get::<bool>("highlight").unwrap_or(true),
+                    ),
+                    None => (DEFAULT_CHILD_OUTPUT_LINES, false, true),
+                };
+                let Some(record) = with_child_records(&lua, |records| {
+                    records
+                        .get(&child_id)
+                        .map(|r| (r.tool.clone(), r.raw_input.clone(), r.output.clone()))
+                })
+                .flatten() else {
+                    return Ok(LuaValue::Nil);
+                };
+                let (tool, raw_input, output) = record;
+                let rendered = smol::unblock(move || {
+                    let invocation = ToolRegistry::native()
+                        .get(&tool)
+                        .and_then(|e| e.tool.parse(&raw_input).ok());
+                    let input = invocation.as_ref().and_then(|inv| inv.start_input());
+                    let start_annotation =
+                        invocation.as_ref().and_then(|inv| inv.start_annotation());
+                    let rendered = renderer(&ToolRenderRequest {
+                        input: input.as_ref(),
+                        output: &output,
+                        output_limit,
+                        expanded,
+                        highlight,
+                    })?;
+                    Some((rendered, start_annotation))
+                })
+                .await;
+                let Some((rendered, start_annotation)) = rendered else {
+                    return Ok(LuaValue::Nil);
+                };
+                let buf = Arc::new(SharedBuf::new());
+                buf.extend(&rendered.lines);
+                let result = lua.create_table()?;
+                result.set("body", BufHandle { id: 0, buf })?;
+                result.set("truncated", rendered.truncated)?;
+                result.set("covers_output", rendered.covers_output)?;
+                if let Some(ann) = join_annotations(start_annotation, rendered.annotation) {
+                    result.set("annotation", ann)?;
+                }
+                Ok(LuaValue::Table(result))
+            },
+        )?,
     )?;
 
     Ok(t)
@@ -472,11 +893,16 @@ fn register_tool_from_lua(lua: &Lua, spec: &Table, pending: PendingTools) -> Lua
     };
 
     let header_fn: Option<Function> = spec.get("header").ok();
+    let start_output_fn: Option<Function> = spec.get("start_output").ok();
     let restore_fn: Option<Function> = spec.get("restore").ok();
     let audience = parse_audience(audiences)?;
     let timeout = parse_timeout(spec)?;
+    let full_view: bool = spec.get("full_view").unwrap_or(false);
     let handler_key: RegistryKey = lua.create_registry_value(handler)?;
     let header_key = header_fn
+        .map(|f| lua.create_registry_value(f))
+        .transpose()?;
+    let start_output_key = start_output_fn
         .map(|f| lua.create_registry_value(f))
         .transpose()?;
     let restore_key = restore_fn
@@ -494,10 +920,12 @@ fn register_tool_from_lua(lua: &Lua, spec: &Table, pending: PendingTools) -> Lua
             audience,
             handler_key,
             header_key,
+            start_output_key,
             restore_key,
             permission_scope_kind,
             permission_scopes_key,
             timeout,
+            full_view,
         });
 
     Ok(())
@@ -677,6 +1105,7 @@ mod tests {
             tool: Arc::from("test_tool"),
             plugin: Arc::from("test"),
             has_header_fn: false,
+            has_start_output_fn: false,
             input,
             tx,
             permission_state: PermissionState::Ready(None),
@@ -709,8 +1138,10 @@ mod tests {
             tx,
             plugin: Arc::from("test"),
             has_header_fn: false,
+            has_start_output_fn: false,
             permission_scope_kind,
             timeout: Some(Duration::from_secs(60)),
+            full_view: false,
         }
     }
 
@@ -799,6 +1230,7 @@ mod tests {
             tool: Arc::from("bash"),
             plugin: Arc::from("test"),
             has_header_fn: false,
+            has_start_output_fn: false,
             input: serde_json::json!({"command": "ls"}),
             tx,
             permission_state: PermissionState::NeedsCompute,
@@ -814,6 +1246,7 @@ mod tests {
             tool: Arc::from("bash"),
             plugin: Arc::from("test"),
             has_header_fn: false,
+            has_start_output_fn: false,
             input: serde_json::json!({"command": "echo hi"}),
             tx: tx2,
             permission_state: PermissionState::NeedsCompute,
@@ -835,6 +1268,7 @@ mod tests {
             tool: Arc::from("bash"),
             plugin: Arc::from("test"),
             has_header_fn: false,
+            has_start_output_fn: false,
             input: serde_json::json!({"command": "cargo test"}),
             tx,
             permission_state: PermissionState::NeedsCompute,
@@ -873,8 +1307,10 @@ mod tests {
             tx,
             plugin: Arc::from("test"),
             has_header_fn: false,
+            has_start_output_fn: false,
             permission_scope_kind: Some(PermissionScopeKind::Field(Arc::from("count"))),
             timeout: Some(Duration::from_secs(60)),
+            full_view: false,
         };
         let inv = tool.parse(&serde_json::json!({"count": 42})).unwrap();
         assert!(smol::block_on(inv.permission_scopes()).is_none());

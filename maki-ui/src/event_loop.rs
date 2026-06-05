@@ -36,7 +36,7 @@ use crate::terminal;
 const ANIMATION_INTERVAL_MS: u64 = 16;
 const IDLE_POLL_INTERVAL_MS: u64 = 100;
 
-pub type BufClickHandler = Arc<dyn Fn(&str, u32) -> Option<maki_lua::ClickReply> + Send + Sync>;
+pub type BufClickHandler = Arc<dyn Fn(&str, u32) + Send + Sync>;
 
 pub struct EventLoopParams {
     pub model: Model,
@@ -334,6 +334,14 @@ impl<'t> EventLoop<'t> {
                             self.app
                                 .transition_plan(crate::app::mode::PlanTrigger::InteractivePrompt);
                         }
+                    }
+                    UiAction::ClickBuf {
+                        tool_id,
+                        live_buf,
+                        done,
+                    } => {
+                        self.app.chats[self.app.active_chat]
+                            .register_click_buf(tool_id, live_buf, done);
                     }
                 }
             }

@@ -11,7 +11,7 @@ use maki_config::{PluginsConfig, RawConfig};
 use crate::api::command::{LuaCommandReader, UiAction};
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
-use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreItem, RestoreReply};
+use crate::runtime::{self, LuaThread, Request, RestoreItem, RestoreReply};
 use maki_agent::prompt::ResolvedSlots;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -55,6 +55,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "question",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/question"),
+    },
+    BundledPlugin {
+        name: "batch",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/batch"),
     },
     BundledPlugin {
         name: "lib",
@@ -279,14 +283,11 @@ impl EventHandle {
         let (tx, _rx) = flume::unbounded();
         Self { tx }
     }
-    pub fn fire_click(&self, tool_id: &str, row: u32) -> Option<ClickReply> {
-        let (tx, rx) = flume::bounded(1);
+    pub fn fire_click(&self, tool_id: &str, row: u32) {
         let _ = self.tx.try_send(Request::FireBufClick {
             tool_id: tool_id.to_owned(),
             row,
-            reply: tx,
         });
-        rx.recv().ok().flatten()
     }
 
     pub fn run_command(&self, plugin: Arc<str>, command: Arc<str>, args: String) {
@@ -381,6 +382,17 @@ mod tests {
                 .map(|c| c.name.as_ref())
                 .collect::<Vec<_>>()
         );
+    }
+
+    const BATCH_BUILTIN_MSG: &str = "batch must be loaded as a builtin plugin";
+
+    #[test]
+    fn batch_builtin_registers_tool() {
+        let reg = Arc::new(ToolRegistry::new());
+        let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        host.load_builtins(&PluginsConfig::from_tools(std::collections::HashMap::new()))
+            .unwrap();
+        assert!(reg.get("batch").is_some(), "{BATCH_BUILTIN_MSG}");
     }
 
     #[test]
@@ -629,5 +641,519 @@ mod tests {
         let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
         let src = format!("maki.api.register_prompt_hint({spec})");
         assert!(host.load_source("bad", &src).is_err());
+    }
+
+    const LIVE_BUF_MSG: &str = "inner tool must emit LiveToolBuf for child tool";
+
+    #[test]
+    fn call_tool_emits_live_tool_buf_for_inner_tool() {
+        use maki_agent::agent::tool_dispatch::{self, Emit};
+        use maki_agent::tools::test_support::stub_ctx_with;
+        use maki_agent::{AgentEvent, AgentMode, Envelope, EventSender};
+
+        let reg = ToolRegistry::native_arc();
+        let host = PluginHost::new(Arc::clone(reg)).unwrap();
+
+        host.load_source(
+            "inner",
+            r#"
+            maki.api.register_tool({
+                name = "inner_tool",
+                description = "test inner",
+                schema = { type = "object", properties = {} },
+                handler = function(input, ctx)
+                    local buf = maki.ui.buf()
+                    buf:line("live line 1")
+                    buf:line("live line 2")
+                    ctx:finish({ llm_output = "inner done", body = buf })
+                    return nil
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        host.load_source(
+            "outer",
+            r#"
+            maki.api.register_tool({
+                name = "outer_tool",
+                description = "test outer",
+                schema = {
+                    type = "object",
+                    properties = {},
+                },
+                handler = function(input, ctx)
+                    local reply = maki.api.call_tool("inner_tool", {}, { id = "outer1__0" })
+                    return reply.output
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        smol::block_on(async {
+            let (tx, rx) = flume::unbounded::<Envelope>();
+            let event_tx = EventSender::new(tx, 0);
+            let ctx = stub_ctx_with(&AgentMode::Build, Some(&event_tx), Some("outer1"));
+
+            let done = tool_dispatch::run(
+                reg,
+                None,
+                "outer1".into(),
+                "outer_tool",
+                &serde_json::json!({}),
+                &ctx,
+                Emit::Notify,
+            )
+            .await;
+
+            assert!(
+                !done.is_error,
+                "outer_tool failed: {}",
+                done.output.as_text()
+            );
+
+            let mut found_live_buf = false;
+            let mut found_child_done = false;
+            while let Ok(env) = rx.try_recv() {
+                match env.event {
+                    AgentEvent::LiveToolBuf { id, body } if id == "outer1__0" => {
+                        found_live_buf = true;
+                        assert!(!body.is_empty(), "LiveToolBuf body should have content");
+                    }
+                    AgentEvent::ToolDone(e) if e.id == "outer1__0" => {
+                        found_child_done = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(found_live_buf, "{LIVE_BUF_MSG}");
+            assert!(found_child_done, "inner tool must emit ToolDone");
+        });
+    }
+
+    #[test]
+    fn call_tool_streams_jobstart_output_via_live_buf() {
+        use maki_agent::agent::tool_dispatch::{self, Emit};
+        use maki_agent::tools::test_support::stub_ctx_with;
+        use maki_agent::{AgentEvent, AgentMode, Envelope, EventSender};
+
+        let reg = ToolRegistry::native_arc();
+        let host = PluginHost::new(Arc::clone(reg)).unwrap();
+
+        host.load_source(
+            "inner_job",
+            r#"
+            maki.api.register_tool({
+                name = "inner_job_tool",
+                description = "uses jobstart",
+                schema = { type = "object", properties = {} },
+                handler = function(input, ctx)
+                    local buf = maki.ui.buf()
+                    buf:line("waiting")
+
+                    maki.fn.jobstart("printf 'line1\nline2\nline3\n'", {
+                        on_stdout = function(_, line)
+                            buf:line(line)
+                        end,
+                        on_exit = function(_, code)
+                            ctx:finish({ llm_output = "done", body = buf })
+                        end,
+                    })
+                    return nil
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        host.load_source(
+            "outer_job",
+            r#"
+            maki.api.register_tool({
+                name = "outer_job_tool",
+                description = "calls inner via call_tool",
+                schema = { type = "object", properties = {} },
+                handler = function(input, ctx)
+                    local reply = maki.api.call_tool("inner_job_tool", {}, { id = "oj1__0" })
+                    return reply.output
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        smol::block_on(async {
+            let (tx, rx) = flume::unbounded::<Envelope>();
+            let event_tx = EventSender::new(tx, 0);
+            let ctx = stub_ctx_with(&AgentMode::Build, Some(&event_tx), Some("oj1"));
+
+            let done = tool_dispatch::run(
+                reg,
+                None,
+                "oj1".into(),
+                "outer_job_tool",
+                &serde_json::json!({}),
+                &ctx,
+                Emit::Notify,
+            )
+            .await;
+
+            assert!(
+                !done.is_error,
+                "outer_job_tool failed: {}",
+                done.output.as_text()
+            );
+
+            let mut live_buf_received_before_done = false;
+            let mut live_buf_body = None;
+            let mut child_done = false;
+
+            while let Ok(env) = rx.try_recv() {
+                match env.event {
+                    AgentEvent::LiveToolBuf { id, body } if id == "oj1__0" => {
+                        if !child_done {
+                            live_buf_received_before_done = true;
+                        }
+                        live_buf_body = Some(body);
+                    }
+                    AgentEvent::ToolDone(e) if e.id == "oj1__0" => {
+                        child_done = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            assert!(
+                live_buf_body.is_some(),
+                "LiveToolBuf must be emitted for inner jobstart tool"
+            );
+            assert!(
+                live_buf_received_before_done,
+                "LiveToolBuf must arrive before ToolDone for streaming"
+            );
+            let buf = live_buf_body.unwrap();
+            assert!(
+                !buf.is_empty(),
+                "SharedBuf must have content after tool completes"
+            );
+        });
+    }
+
+    const BATCH_HANG_MSG: &str = "async.join with call_tool must complete without hanging";
+
+    #[test]
+    fn async_join_with_call_tool_completes() {
+        use maki_agent::agent::tool_dispatch::{self, Emit};
+        use maki_agent::tools::test_support::stub_ctx_with;
+        use maki_agent::{AgentMode, Envelope, EventSender};
+
+        let reg = ToolRegistry::native_arc();
+        let host = PluginHost::new(Arc::clone(reg)).unwrap();
+
+        host.load_source(
+            "echo_tool_src",
+            r#"
+            maki.api.register_tool({
+                name = "echo_tool",
+                description = "echoes input",
+                schema = { type = "object", properties = { msg = { type = "string" } } },
+                handler = function(input, ctx)
+                    return input.msg or "no msg"
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        host.load_source(
+            "batch_like",
+            r#"
+            maki.api.register_tool({
+                name = "batch_like_tool",
+                description = "uses async.join + call_tool like batch",
+                schema = { type = "object", properties = {} },
+                handler = function(input, ctx)
+                    local results = {}
+                    local funs = {}
+                    local buf = maki.ui.buf()
+                    for i = 1, 3 do
+                        funs[i] = function()
+                            local reply = maki.api.call_tool("echo_tool", { msg = "hello " .. i }, {
+                                id = "bl1__" .. (i - 1),
+                                parent_id = "bl1",
+                                on_output = function(child_buf)
+                                    results[i] = { body = child_buf }
+                                    buf:set_lines({})
+                                    buf:line("updated " .. i)
+                                end,
+                            })
+                            results[i] = reply
+                        end
+                    end
+                    maki.async.join(3, funs)
+                    local parts = {}
+                    for i = 1, 3 do
+                        parts[i] = results[i] and results[i].output or "nil"
+                    end
+                    return { llm_output = table.concat(parts, "|"), body = buf }
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        smol::block_on(async {
+            let (tx, _rx) = flume::unbounded::<Envelope>();
+            let event_tx = EventSender::new(tx, 0);
+            let ctx = stub_ctx_with(&AgentMode::Build, Some(&event_tx), Some("bl1"));
+
+            let done = smol::future::or(
+                async {
+                    tool_dispatch::run(
+                        reg,
+                        None,
+                        "bl1".into(),
+                        "batch_like_tool",
+                        &serde_json::json!({}),
+                        &ctx,
+                        Emit::Notify,
+                    )
+                    .await
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("{BATCH_HANG_MSG}");
+                },
+            )
+            .await;
+
+            assert!(
+                !done.is_error,
+                "batch_like_tool failed: {}",
+                done.output.as_text()
+            );
+            let text = done.output.as_text();
+            assert!(
+                text.contains("hello 1") && text.contains("hello 2") && text.contains("hello 3"),
+                "expected all 3 results, got: {text}"
+            );
+        });
+    }
+
+    const STREAMING_MSG: &str = "SharedBuf must be dirty while subprocess is running";
+
+    /// Children that yield mid-handler make their `TaskScope`s interleave on
+    /// the Lua executor, so one scope captures another's handle as `prev` and
+    /// re-publishes it into app_data on drop. The pinned `TaskCell` must not
+    /// keep the child's captured event sender alive, or the dispatch drain
+    /// never finishes and `call_tool` hangs (batch stuck in-progress).
+    #[test]
+    fn async_join_with_yielding_children_completes() {
+        use maki_agent::agent::tool_dispatch::{self, Emit};
+        use maki_agent::tools::test_support::stub_ctx_with;
+        use maki_agent::{AgentMode, Envelope, EventSender};
+
+        let reg = ToolRegistry::native_arc();
+        let host = PluginHost::new(Arc::clone(reg)).unwrap();
+
+        host.load_source(
+            "sleepy",
+            r#"
+            maki.api.register_tool({
+                name = "sleepy_tool",
+                description = "sleeps via jobstart",
+                schema = { type = "object", properties = { secs = { type = "string" } } },
+                handler = function(input, ctx)
+                    local buf = maki.ui.buf()
+                    buf:line("waiting " .. input.secs)
+                    maki.fn.jobstart("sleep " .. input.secs, {
+                        on_exit = function(_, code)
+                            ctx:finish({ llm_output = "slept " .. input.secs, body = buf })
+                        end,
+                    })
+                    return nil
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        host.load_source(
+            "batch_slow",
+            r#"
+            maki.api.register_tool({
+                name = "batch_slow_tool",
+                description = "joins yielding children like batch",
+                schema = { type = "object", properties = {} },
+                handler = function(input, ctx)
+                    local results = {}
+                    local funs = {}
+                    local secs = { "0.1", "0.3" }
+                    for i = 1, 2 do
+                        funs[i] = function()
+                            local reply = maki.api.call_tool("sleepy_tool", { secs = secs[i] }, {
+                                id = "sb1__" .. (i - 1),
+                                parent_id = "sb1",
+                                on_output = function(_) end,
+                            })
+                            results[i] = reply.output
+                        end
+                    end
+                    maki.async.join(2, funs)
+                    return table.concat(results, "|")
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        smol::block_on(async {
+            let (tx, _rx) = flume::unbounded::<Envelope>();
+            let event_tx = EventSender::new(tx, 0);
+            let ctx = stub_ctx_with(&AgentMode::Build, Some(&event_tx), Some("sb1"));
+
+            let done = smol::future::or(
+                async {
+                    tool_dispatch::run(
+                        reg,
+                        None,
+                        "sb1".into(),
+                        "batch_slow_tool",
+                        &serde_json::json!({}),
+                        &ctx,
+                        Emit::Notify,
+                    )
+                    .await
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("{BATCH_HANG_MSG}");
+                },
+            )
+            .await;
+
+            assert!(
+                !done.is_error,
+                "batch_slow_tool failed: {}",
+                done.output.as_text()
+            );
+            let text = done.output.as_text();
+            assert_eq!(text, "slept 0.1|slept 0.3");
+        });
+    }
+
+    #[test]
+    fn call_tool_jobstart_buf_updates_incrementally() {
+        use maki_agent::agent::tool_dispatch::{self, Emit};
+        use maki_agent::tools::test_support::stub_ctx_with;
+        use maki_agent::{AgentEvent, AgentMode, Envelope, EventSender, SharedBuf};
+
+        let reg = ToolRegistry::native_arc();
+        let host = PluginHost::new(Arc::clone(reg)).unwrap();
+
+        host.load_source(
+            "slow_inner",
+            r#"
+            maki.api.register_tool({
+                name = "slow_inner_tool",
+                description = "slow subprocess",
+                schema = { type = "object", properties = {} },
+                handler = function(input, ctx)
+                    local buf = maki.ui.buf()
+                    maki.fn.jobstart("for i in 1 2 3; do echo line_$i; sleep 0.15; done", {
+                        on_stdout = function(_, line)
+                            buf:line(line)
+                        end,
+                        on_exit = function(_, code)
+                            ctx:finish({ llm_output = "done", body = buf })
+                        end,
+                    })
+                    return nil
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        host.load_source(
+            "slow_outer",
+            r#"
+            maki.api.register_tool({
+                name = "slow_outer_tool",
+                description = "calls slow inner",
+                schema = { type = "object", properties = {} },
+                handler = function(input, ctx)
+                    local reply = maki.api.call_tool("slow_inner_tool", {}, { id = "so1__0" })
+                    return reply.output
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        smol::block_on(async {
+            let (tx, rx) = flume::unbounded::<Envelope>();
+            let event_tx = EventSender::new(tx, 0);
+            let ctx = stub_ctx_with(&AgentMode::Build, Some(&event_tx), Some("so1"));
+
+            let run_handle = smol::spawn({
+                let reg = Arc::clone(reg);
+                let ctx = ctx.clone();
+                async move {
+                    tool_dispatch::run(
+                        &reg,
+                        None,
+                        "so1".into(),
+                        "slow_outer_tool",
+                        &serde_json::json!({}),
+                        &ctx,
+                        Emit::Notify,
+                    )
+                    .await
+                }
+            });
+
+            // Wait for LiveToolBuf event
+            let mut shared_buf: Option<Arc<SharedBuf>> = None;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while shared_buf.is_none() && std::time::Instant::now() < deadline {
+                if let Ok(env) = rx.try_recv() {
+                    if let AgentEvent::LiveToolBuf { id, body } = env.event {
+                        if id == "so1__0" {
+                            shared_buf = Some(body);
+                        }
+                    }
+                }
+                smol::Timer::after(Duration::from_millis(10)).await;
+            }
+            assert!(shared_buf.is_some(), "LiveToolBuf must be emitted");
+            let buf = shared_buf.unwrap();
+
+            // Poll the buf over time and track distinct lengths seen
+            let mut seen_lengths = vec![buf.len()];
+            for _ in 0..30 {
+                smol::Timer::after(Duration::from_millis(50)).await;
+                let current_len = buf.len();
+                if Some(&current_len) != seen_lengths.last() {
+                    seen_lengths.push(current_len);
+                }
+            }
+
+            let done = run_handle.await;
+            assert!(
+                !done.is_error,
+                "slow_outer_tool failed: {}",
+                done.output.as_text()
+            );
+
+            assert!(
+                seen_lengths.len() >= 2,
+                // The subprocess echoes 3 lines with 150ms sleep between.
+                // We poll every 50ms, so we should see at least 2 distinct lengths.
+                "{STREAMING_MSG}: saw only these lengths: {seen_lengths:?}"
+            );
+        });
     }
 }
