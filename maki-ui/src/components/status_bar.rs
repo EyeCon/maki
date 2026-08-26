@@ -23,6 +23,7 @@ const CWD_MODEL_SEPARATOR: &str = "  ";
 const FAST_LABEL: &str = " [fast]";
 const WORKFLOW_LABEL: &str = " [workflow]";
 const YOLO_LABEL: &str = " [yolo]";
+const YOLO_DIM_FACTOR: f32 = 0.5;
 
 pub struct UsageStats {
     /// The whole session's bill, drawn next to the focused chat's own once
@@ -197,7 +198,10 @@ impl StatusBar {
                     rest_spans.push(Span::styled(WORKFLOW_LABEL, theme::current().status_dim));
                 }
                 if ctx.yolo {
-                    rest_spans.push(Span::styled(YOLO_LABEL, theme::current().error));
+                    rest_spans.push(Span::styled(
+                        YOLO_LABEL,
+                        theme::dim_style(theme::current().error, YOLO_DIM_FACTOR),
+                    ));
                 }
 
                 let context_text = format!(
