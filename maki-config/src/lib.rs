@@ -271,7 +271,7 @@ impl RawConfig {
         self.tools.extend(overlay.tools);
     }
 
-    pub fn into_config(self, no_rtk: bool) -> Result<Config, ConfigError> {
+    pub fn into_config(self) -> Result<Config, ConfigError> {
         self.validate_plugin_tables()?;
         let disabled_tools: Vec<String> = self
             .plugins
@@ -288,7 +288,7 @@ impl RawConfig {
                 .map(AlwaysThinking::resolve)
                 .transpose()?,
             ui: UiConfig::from_file(self.ui),
-            agent: AgentConfig::from_file(self.agent, no_rtk, disabled_tools),
+            agent: AgentConfig::from_file(self.agent, disabled_tools),
             provider: ProviderConfig::from_file(self.provider)?,
             storage: StorageConfig::from_file(self.storage),
             telemetry: self.telemetry,
@@ -494,6 +494,7 @@ pub struct AgentFileConfig {
     pub compaction_instructions: Option<String>,
     pub post_compaction_instructions: Option<String>,
     pub stale_read_check: Option<bool>,
+    pub rtk: Option<bool>,
 }
 
 impl AgentFileConfig {
@@ -507,7 +508,8 @@ impl AgentFileConfig {
             compaction_buffer,
             compaction_instructions,
             post_compaction_instructions,
-            stale_read_check
+            stale_read_check,
+            rtk
         );
     }
 }
@@ -1068,8 +1070,11 @@ pub struct AgentConfig {
     )]
     pub stale_read_check: bool,
 
-    #[config(skip, default = false)]
-    pub no_rtk: bool,
+    #[config(
+        default = true,
+        desc = "Rewrite bash commands with [rtk](https://github.com/rtk-ai/rtk) when it is installed"
+    )]
+    pub rtk: bool,
 
     #[config(skip, default = "None")]
     pub max_turns: Option<u32>,
@@ -1082,9 +1087,8 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    fn from_file(file: AgentFileConfig, no_rtk: bool, disabled_tools: Vec<String>) -> Self {
+    fn from_file(file: AgentFileConfig, disabled_tools: Vec<String>) -> Self {
         Self {
-            no_rtk,
             max_output_bytes: file.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES),
             max_output_lines: file.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
             max_continuation_turns: file
@@ -1094,6 +1098,7 @@ impl AgentConfig {
             compaction_instructions: file.compaction_instructions,
             post_compaction_instructions: file.post_compaction_instructions,
             stale_read_check: file.stale_read_check.unwrap_or(true),
+            rtk: file.rtk.unwrap_or(true),
             max_turns: None,
             allowed_tools: Vec::new(),
             disabled_tools,
@@ -2243,7 +2248,7 @@ mod tests {
 
     #[test]
     fn empty_config_returns_defaults() {
-        let config = RawConfig::default().into_config(false).unwrap();
+        let config = RawConfig::default().into_config().unwrap();
         assert!(config.ui.splash_animation);
         assert_eq!(config.ui.notifications, NotificationMethod::Auto);
         assert_eq!(config.agent.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);
@@ -2264,7 +2269,7 @@ mod tests {
     fn notifications_deserialize(value: &str, expected: NotificationMethod) {
         let raw: RawConfig =
             toml::from_str(&format!("[ui]\nnotifications = \"{value}\"\n")).unwrap();
-        assert_eq!(raw.into_config(false).unwrap().ui.notifications, expected);
+        assert_eq!(raw.into_config().unwrap().ui.notifications, expected);
     }
 
     #[test]
@@ -2282,7 +2287,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let config = raw.into_config(false).unwrap();
+        let config = raw.into_config().unwrap();
         assert_eq!(config.agent.max_output_lines, 5000);
         assert_eq!(config.agent.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);
     }
@@ -2349,7 +2354,7 @@ mod tests {
             ..Default::default()
         });
 
-        let provider = global.into_config(false).unwrap().provider;
+        let provider = global.into_config().unwrap().provider;
         assert!(provider.allowed_models.is_empty());
         assert_eq!(provider.excluded_models, ["*/*-preview"]);
         assert!(provider.model_policy.allows("openai/gpt-5"));
@@ -2366,7 +2371,7 @@ mod tests {
             },
             ..Default::default()
         }
-        .into_config(false)
+        .into_config()
         .unwrap();
         let policy = &config.provider.model_policy;
 
@@ -2382,7 +2387,7 @@ mod tests {
             },
             ..Default::default()
         }
-        .into_config(false)
+        .into_config()
         .unwrap();
         assert!(exclude_only.provider.model_policy.allows("openai/gpt-5"));
         assert!(
@@ -2402,7 +2407,7 @@ mod tests {
             },
             ..Default::default()
         }
-        .into_config(false);
+        .into_config();
 
         assert!(matches!(
             result,
@@ -2437,14 +2442,14 @@ mod tests {
 
     #[test]
     fn always_workflow_resolves_default_and_set() {
-        let defaults = RawConfig::default().into_config(false).unwrap();
+        let defaults = RawConfig::default().into_config().unwrap();
         assert!(!defaults.always_workflow, "absent resolves to false");
 
         let raw = RawConfig {
             always_workflow: Some(true),
             ..Default::default()
         };
-        assert!(raw.into_config(false).unwrap().always_workflow);
+        assert!(raw.into_config().unwrap().always_workflow);
     }
 
     #[test_case(AlwaysThinking::Toggle(true), StoredThinking::Adaptive ; "toggle_true")]
@@ -2458,14 +2463,14 @@ mod tests {
 
     #[test]
     fn into_config_resolves_always_thinking() {
-        let defaults = RawConfig::default().into_config(false).unwrap();
+        let defaults = RawConfig::default().into_config().unwrap();
         assert!(defaults.always_thinking.is_none());
 
         let raw = RawConfig {
             always_thinking: Some(AlwaysThinking::Mode("8192".into())),
             ..Default::default()
         };
-        let config = raw.into_config(false).unwrap();
+        let config = raw.into_config().unwrap();
         assert_eq!(
             config.always_thinking,
             Some(StoredThinking::Budget { tokens: 8192 })
@@ -2475,7 +2480,7 @@ mod tests {
             always_thinking: Some(AlwaysThinking::Mode("fast".into())),
             ..Default::default()
         };
-        let err = raw.into_config(false).err().expect("expected config error");
+        let err = raw.into_config().err().expect("expected config error");
         assert!(matches!(err, ConfigError::Thinking(_)));
     }
 
@@ -2506,7 +2511,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let config = raw.into_config(false).unwrap();
+        let config = raw.into_config().unwrap();
         assert_eq!(config.ui.tool_output_lines.bash, 20);
         assert_eq!(config.ui.tool_output_lines.read, 20);
         assert_eq!(
@@ -2931,14 +2936,14 @@ mod tests {
     #[test]
     fn show_thinking_missing_defaults_true() {
         let raw: RawConfig = toml::from_str("").unwrap();
-        let config = raw.into_config(false).unwrap();
+        let config = raw.into_config().unwrap();
         assert!(config.ui.show_thinking);
     }
 
     #[test]
     fn max_input_lines_defaults_and_deserializes() {
         let raw: RawConfig = toml::from_str("").unwrap();
-        let config = raw.into_config(false).unwrap();
+        let config = raw.into_config().unwrap();
         assert_eq!(config.ui.max_input_lines, DEFAULT_MAX_INPUT_LINES);
 
         let raw: RawConfig = toml::from_str("[ui]\nmax_input_lines = 5\n").unwrap();
@@ -2984,7 +2989,7 @@ mod tests {
             "[plugins.bash]\ntimeout_secs = 180\n[plugins.websearch]\nenabled = false\n",
         )
         .unwrap();
-        let config = raw.into_config(false).unwrap();
+        let config = raw.into_config().unwrap();
         assert!(config.plugins.names.contains(&"bash".to_string()));
         assert!(!config.plugins.names.contains(&"websearch".to_string()));
         assert!(
@@ -3095,7 +3100,7 @@ mod tests {
     fn removed_sub_tool_tables_error() {
         for &tool in EDIT_SUB_TOOLS {
             let raw: RawConfig = toml::from_str(&format!("[plugins.{tool}]\n")).unwrap();
-            let Err(err) = raw.into_config(false) else {
+            let Err(err) = raw.into_config() else {
                 panic!("plugins.{tool} should be rejected");
             };
             let msg = err.to_string();
@@ -3111,7 +3116,7 @@ mod tests {
     #[test_case("search_result_limit = 50" ; "opts_only")]
     fn unknown_plugin_name_errors(body: &str) {
         let raw: RawConfig = toml::from_str(&format!("[plugins.gerp]\n{body}\n")).unwrap();
-        let Err(err) = raw.into_config(false) else {
+        let Err(err) = raw.into_config() else {
             panic!("plugins.gerp should be rejected");
         };
         let msg = err.to_string();
@@ -3125,7 +3130,7 @@ mod tests {
     fn disabled_plugin_keeps_opts_but_not_load_entry() {
         let raw: RawConfig =
             toml::from_str("[plugins.bash]\nenabled = false\ntimeout_secs = 180\n").unwrap();
-        let config = raw.into_config(false).unwrap();
+        let config = raw.into_config().unwrap();
         assert!(!config.plugins.names.contains(&"bash".to_string()));
         assert_eq!(
             config.plugins.opts["bash"]["timeout_secs"],
@@ -3137,7 +3142,7 @@ mod tests {
     #[test]
     fn renamed_tools_table_errors() {
         let raw: RawConfig = toml::from_str("[tools.bash]\nenabled = true\n").unwrap();
-        let Err(err) = raw.into_config(false) else {
+        let Err(err) = raw.into_config() else {
             panic!("old tools table should be rejected");
         };
         assert!(
@@ -3150,7 +3155,7 @@ mod tests {
     fn edit_sub_tool_toggles_flow_as_edit_opts() {
         let raw: RawConfig =
             toml::from_str("[plugins.edit]\nmultiedit = false\nedit_lines = true\n").unwrap();
-        let config = raw.into_config(false).unwrap();
+        let config = raw.into_config().unwrap();
         assert_eq!(
             config.plugins.opts["edit"]["multiedit"],
             serde_json::json!(false)

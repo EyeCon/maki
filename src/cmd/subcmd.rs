@@ -564,7 +564,7 @@ fn load_effective_config(host: &PluginHost, no_plugins: bool, cwd: &Path) -> Res
     host.load_init_files_or_skip(no_plugins, cwd)
         .context("load init.lua files")?
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")
 }
 
@@ -581,7 +581,7 @@ pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
 
     let mut config = raw_config
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")?;
     config.permissions = load_permissions(&cwd);
 
@@ -677,7 +677,7 @@ pub fn prompt(
         .context("load init.lua files")?;
     let config = raw_config
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")?;
     host.load_builtins(&config.plugins)
         .context("load builtin plugins")?;

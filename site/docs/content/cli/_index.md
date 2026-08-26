@@ -46,7 +46,6 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 | `--output-format <text\|json\|stream-json>` | Output shape for `--print` (default `text`) |
 | `--input-format <text\|stream-json>` | With `--print`, `stream-json` enters SDK mode |
 | `--no-commands` | Skip custom commands from `.maki/commands`, `.claude/commands`, etc. |
-| `--no-rtk` | Disable [rtk](https://github.com/rtk-ai/rtk) command rewriting |
 | `--no-plugins` | Skip user `init.lua` (global and project); keep the Lua host and builtin plugins so tools and the default keymap still load |
 | `--no-jit` | Run plugin Lua on the interpreter with full debug info |
 | `--yolo` | Skip permission prompts on gated tools (alias: `--dangerously-skip-permissions`). Deny rules still apply |
