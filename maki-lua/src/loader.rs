@@ -19,7 +19,7 @@ use crate::plugin_permissions::{
     PluginPermissions, check_plugin_compatibility, load_plugin_permissions,
 };
 use crate::runtime::{
-    self, ClickFallback, ConfigScope, LoadChunk, LuaThread, Request, RestoreItem,
+    self, ClickFallback, ConfigScope, LoadChunk, LoadContext, LuaThread, Request, RestoreItem,
 };
 use maki_agent::prompt::ResolvedSlots;
 
@@ -386,26 +386,20 @@ impl PluginHost {
             self.send_load(
                 Arc::clone(&name),
                 vec![LoadChunk::new(name.as_ref(), init)],
-                None,
-                PluginPermissions::trusted(),
-                opts,
-                None,
-                false,
+                LoadContext {
+                    opts,
+                    ..LoadContext::plain(None, PluginPermissions::trusted())
+                },
             )?;
         }
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn send_load(
         &self,
         name: Arc<str>,
         chunks: Vec<LoadChunk>,
-        plugin_dir: Option<PathBuf>,
-        permissions: PluginPermissions,
-        opts: PluginOpts,
-        revision_guard: Option<Arc<maki_pack::lock::Lock>>,
-        package: bool,
+        context: LoadContext,
     ) -> Result<(), PluginError> {
         let (reply_tx, reply_rx) = flume::bounded(1);
         self.inner
@@ -413,11 +407,7 @@ impl PluginHost {
             .send(Request::LoadSource {
                 name,
                 chunks,
-                plugin_dir,
-                permissions,
-                opts,
-                revision_guard,
-                package,
+                context,
                 reply: reply_tx,
             })
             .map_err(|_| PluginError::HostDead)?;
@@ -435,13 +425,28 @@ impl PluginHost {
         reply_rx.recv().map_err(|_| PluginError::HostDead)
     }
 
+    /// Runs a source as the global `init.lua`.
+    ///
+    /// The one scope where `maki.pack.add` may declare packages, so it is its
+    /// own method: deriving the privilege from a source name would let any
+    /// caller reach it by spelling the name the right way.
+    pub fn send_global_init_lua(
+        &self,
+        source: String,
+        plugin_dir: Option<PathBuf>,
+    ) -> Result<Option<RawConfig>, PluginError> {
+        self.send_config_lua(source, ConfigScope::Global, plugin_dir)
+    }
+
+    /// Runs a source as a config chunk named after itself. It gets the
+    /// read-only `maki.pack` table.
     pub fn send_run_init_lua(
         &self,
         source: String,
         source_name: String,
         plugin_dir: Option<PathBuf>,
     ) -> Result<Option<RawConfig>, PluginError> {
-        self.send_config_lua(source, ConfigScope::named(source_name), plugin_dir)
+        self.send_config_lua(source, ConfigScope::Named(source_name), plugin_dir)
     }
 
     fn send_config_lua(
@@ -489,11 +494,10 @@ impl PluginHost {
         self.send_load(
             Arc::from(name),
             vec![LoadChunk::new(name, source)],
-            None,
-            PluginPermissions::trusted(),
-            Arc::new(opts),
-            None,
-            false,
+            LoadContext {
+                opts: Arc::new(opts),
+                ..LoadContext::plain(None, PluginPermissions::trusted())
+            },
         )
     }
 
@@ -506,11 +510,7 @@ impl PluginHost {
         self.send_load(
             Arc::from(name),
             vec![LoadChunk::new(name, source)],
-            None,
-            permissions,
-            PluginOpts::default(),
-            None,
-            false,
+            LoadContext::plain(None, permissions),
         )
     }
 
@@ -529,11 +529,7 @@ impl PluginHost {
         self.send_load(
             Arc::from(USER_PLUGIN),
             vec![LoadChunk::new(path.display().to_string(), source)],
-            plugin_dir,
-            permissions,
-            PluginOpts::default(),
-            None,
-            false,
+            LoadContext::plain(plugin_dir, permissions),
         )
     }
 
@@ -562,10 +558,13 @@ impl PluginHost {
             .tx
             .send(Request::RunPackLoader {
                 declared,
-                path: package.dir.clone(),
-                permissions,
-                opts,
-                revision_guard: package.revision_guard.clone(),
+                context: LoadContext {
+                    plugin_dir: Some(package.dir.clone()),
+                    permissions,
+                    opts,
+                    revision_guard: package.revision_guard.clone(),
+                    package: true,
+                },
                 reply: reply_tx,
             })
             .map_err(|_| PluginError::HostDead)?;
@@ -632,13 +631,16 @@ impl PluginHost {
         self.send_load(
             Arc::from(name),
             chunks,
-            Some(root),
-            permissions,
-            opts,
-            revision_guard,
-            true,
+            LoadContext {
+                plugin_dir: Some(root),
+                permissions,
+                opts,
+                revision_guard,
+                package: true,
+            },
         )
     }
+
     /// Refuses further `maki.packadd` calls, and returns anything the queue
     /// still holds.
     ///
@@ -679,19 +681,12 @@ impl PluginHost {
         packages: &[DiscoveredPackage],
         config: &PluginsConfig,
     ) -> Vec<String> {
-        self.load_packages_inner(packages, &[], config)
+        self.load_declared_packages(packages, &[], config)
     }
 
+    /// As `load_packages`, with the declarations that may carry a custom
+    /// loader. A package with no matching declaration loads its `plugin/*.lua`.
     pub fn load_declared_packages(
-        &self,
-        packages: &[DiscoveredPackage],
-        declared: &[crate::api::pack::Declared],
-        config: &PluginsConfig,
-    ) -> Vec<String> {
-        self.load_packages_inner(packages, declared, config)
-    }
-
-    fn load_packages_inner(
         &self,
         packages: &[DiscoveredPackage],
         declared: &[crate::api::pack::Declared],

@@ -13,16 +13,16 @@ use maki_storage::StateDir;
 use crate::cli::{AuthAction, Cli, Command, McpAction, MigrateAction};
 use crate::update;
 
-fn sanitize_warning(message: impl std::fmt::Display) -> String {
-    maki_lua::sanitize_message(&message.to_string())
-}
-
-fn sanitize_warnings(warnings: Vec<String>) -> Vec<String> {
-    warnings.into_iter().map(sanitize_warning).collect()
+fn sanitize_warnings(warnings: &[String]) -> Vec<String> {
+    warnings
+        .iter()
+        .map(String::as_str)
+        .map(maki_lua::sanitize_message)
+        .collect()
 }
 
 fn report_warnings(warnings: Vec<String>) {
-    for warning in sanitize_warnings(warnings) {
+    for warning in sanitize_warnings(&warnings) {
         eprintln!("warning: {warning}");
     }
 }
@@ -102,7 +102,7 @@ fn load_plugins(
         .collect();
     warnings.extend(host.load_declared_packages(&available, &declared, &config.plugins));
 
-    Ok((config, sanitize_warnings(warnings)))
+    Ok((config, sanitize_warnings(&warnings)))
 }
 
 fn declared_packages(host: &PluginHost) -> Result<Vec<maki_lua::Declared>> {

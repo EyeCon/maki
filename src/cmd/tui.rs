@@ -187,7 +187,7 @@ fn build_stack(
             model,
             needs_login,
         },
-        super::sanitize_warnings(warnings),
+        super::sanitize_warnings(&warnings),
     ))
 }
 

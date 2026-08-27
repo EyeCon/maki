@@ -2814,6 +2814,7 @@ dependencies = [
  "regex",
  "rustix",
  "semver",
+ "serde",
  "serde_json",
  "serde_yaml",
  "smol",
