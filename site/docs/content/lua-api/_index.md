@@ -83,7 +83,9 @@ The rules:
 - `min_maki_version` is optional and takes a plain semantic version as a lower
   bound, so ranges do not work. When the field is invalid or the running
   version is older, Maki skips the Lua in that directory and warns at startup
-  instead of failing. `--no-plugins` still skips every user plugin at once.
+  instead of failing. The same floor applies to an installed package, which is
+  skipped while the rest keep loading. `--no-plugins` still skips every user
+  plugin at once.
 
 ## Overview
 

@@ -22,6 +22,9 @@ const GLOBAL_PACK_ONLY_ERR: &str = "only available in the global init.lua";
 const USAGE_TOOL_NAME: &str = "usage_child";
 const USAGE_VALUE: &str = "12.3k↑ 456↓ $0.123";
 const USAGE_OUTPUT: &str = "usage_done";
+const FLOORED_PACKAGE: &str = "future_pack";
+const SIBLING_PACKAGE: &str = "sibling_pack";
+const MALFORMED_FLOOR: &str = "min_maki_version = 12\n";
 
 /// Lua tools cannot publish `ToolLive::Usage` (only the subagent relay does), so
 /// a native stub stands in for one.
@@ -3724,6 +3727,69 @@ maki.api.register_command({
 
     let snap = host.command_reader().load();
     assert_eq!(snap.commands[0].name.as_ref(), "/allowed");
+}
+
+/// The manifest body and the fragment the warning has to name.
+fn floor_above_running_version() -> (String, String) {
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let required = format!("{}.0.0", running.major + 1);
+    (format!("min_maki_version = {required:?}\n"), required)
+}
+
+fn malformed_floor() -> (String, String) {
+    (MALFORMED_FLOOR.to_owned(), FLOORED_PACKAGE.to_owned())
+}
+
+/// The version floor covers installed packages, not just `init.lua`: a package
+/// asking for a newer Maki is skipped with a warning, registers nothing, and
+/// leaves the packages loading beside it alone.
+#[test_case::test_case(floor_above_running_version ; "required version is newer")]
+#[test_case::test_case(malformed_floor ; "required version is not a string")]
+fn incompatible_package_is_skipped_and_its_sibling_still_loads(floor: fn() -> (String, String)) {
+    let (manifest, expected) = floor();
+    let site = site_with_package(
+        "start",
+        FLOORED_PACKAGE,
+        &[(
+            "init.lua",
+            r#"
+maki.api.register_command({ name = "/future", handler = function() end })
+maki.api.register_tool({
+  name = "future_tool",
+  description = "must never register",
+  schema = { type = "object", properties = {} },
+  handler = function() return "x" end,
+})
+"#,
+        )],
+    );
+    let start = site.path().join("pack").join("vendor").join("start");
+    std::fs::write(start.join(FLOORED_PACKAGE).join("plugin.toml"), manifest).unwrap();
+    let sibling = start.join(SIBLING_PACKAGE).join("plugin");
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(
+        sibling.join("init.lua"),
+        r#"maki.api.register_command({ name = "/sibling", handler = function() end })"#,
+    )
+    .unwrap();
+
+    let found = maki_lua::discover(site.path());
+    let (_, config) = discovered_config(&found);
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let failures = host.load_packages(&found.packages, &config);
+
+    let warning = failures
+        .iter()
+        .find(|w| w.contains(SKIPPED_PLUGIN_WARNING))
+        .unwrap_or_else(|| panic!("no skip warning in {failures:?}"));
+    assert!(warning.contains(&expected), "{warning}");
+    assert_eq!(failures.len(), 1, "got: {failures:?}");
+    assert!(!reg.has("future_tool"));
+
+    let snap = host.command_reader().load();
+    let names: Vec<&str> = snap.commands.iter().map(|c| c.name.as_ref()).collect();
+    assert_eq!(names, vec!["/sibling"]);
 }
 
 #[test]
