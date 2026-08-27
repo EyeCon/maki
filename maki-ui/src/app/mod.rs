@@ -239,6 +239,10 @@ pub struct App {
     pub(crate) permissions: Arc<PermissionManager>,
     pub(crate) model_policy: Arc<ModelPolicy>,
     pub(crate) lua_event_handle: EventHandle,
+    /// The spec Lua was last told about. Seeded with the live model rather
+    /// than the session's stored one: a restored session may name another
+    /// model, and the event loop swaps the live one in on the first tick.
+    announced_model_spec: String,
     pub(super) keymap_reader: KeymapReader,
     pub(super) hint_reader: HintReader,
     hints: Watch<HintSnapshot>,
@@ -330,6 +334,7 @@ impl App {
             permissions,
             model_policy: Arc::clone(&model_policy),
             lua_event_handle,
+            announced_model_spec: model.spec(),
             hints: Watch::seeded(hint_reader.load_full()),
             keymap_reader,
             hint_reader,
@@ -361,6 +366,24 @@ impl App {
     pub(crate) fn update_model(&mut self, model: &Model) {
         self.state.update_model(model);
         persist_model(&self.storage, &self.state.session.model);
+    }
+
+    /// One diff per frame covers every way a model can change (the picker,
+    /// `/model`, `maki.model.set`, the provider fallback, loading another
+    /// session, which swaps `state` wholesale), so no path has to remember to
+    /// speak up. The spec alone decides: the background catalog fetch
+    /// re-stores the running model once it learns its context window, and a
+    /// hint has nothing new to draw for that.
+    pub(crate) fn emit_model_change(&mut self) {
+        let spec = self.state.model.spec();
+        if spec == self.announced_model_spec {
+            return;
+        }
+        let previous_spec = std::mem::replace(&mut self.announced_model_spec, spec);
+        self.fire_session_autocmd(
+            "ModelChanged",
+            serde_json::json!({ "model": self.model_state(), "previous_spec": previous_spec }),
+        );
     }
 
     /// Takes the spelling both `/thinking` and `maki.model.set` accept; a

@@ -45,6 +45,7 @@ const RESUMED_PROMPT: &str = "carry me over";
 const SONNET_SPEC: &str = "anthropic/claude-sonnet-4-5";
 const OPUS_SPEC: &str = "anthropic/claude-opus-4-8";
 const PLAIN_MODEL_SPEC: &str = "ollama/qwen3";
+const MODEL_CHANGED_EVENT: &str = "ModelChanged";
 const WALK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Stands in for a size the provider measured, baseline included.
 const MEASURED_CONTEXT: u32 = 100_000;
@@ -4112,6 +4113,52 @@ fn model_state_reports_the_model_and_what_it_supports() {
             "supports_fast": true,
         })
     );
+}
+
+/// A plugin redraws its badge from the payload alone, and only when the model
+/// really moved: the catalog fetch re-stores the running model once it learns
+/// its context window, and startup has nothing to announce yet.
+#[test]
+fn model_change_fires_once_per_real_swap() {
+    let (_tmp, _storage, _writer, mut app) = tempdir_app();
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+    let before = app.state.model.spec();
+
+    app.emit_model_change();
+    assert_eq!(probe.try_recv_autocmd(), None);
+
+    app.update_model(&maki_providers::Model::from_spec(OPUS_SPEC).unwrap());
+    app.emit_model_change();
+    app.emit_model_change();
+
+    let (event, data) = probe.try_recv_autocmd().expect(MODEL_CHANGED_EVENT);
+    assert_eq!(event, MODEL_CHANGED_EVENT);
+    assert_eq!(
+        data["session_id"],
+        serde_json::json!(app.state.session.id.to_string())
+    );
+    assert_eq!(data["model"], app.model_state());
+    assert_eq!(data["model"]["spec"], serde_json::json!(OPUS_SPEC));
+    assert_eq!(data["previous_spec"], serde_json::json!(before));
+    assert_eq!(probe.try_recv_autocmd(), None);
+}
+
+/// Loading a session swaps the whole state in instead of going through
+/// `update_model`, so the diff has to catch that one on its own.
+#[test]
+fn loading_a_session_on_another_model_announces_the_swap() {
+    let (_tmp, _storage, _writer, mut app) = tempdir_app();
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+    let fallback = app.state.model.clone();
+
+    app.apply_loaded_session(AppSession::new(OPUS_SPEC, "/tmp/test"), &fallback);
+    app.emit_model_change();
+
+    let (event, data) = probe.try_recv_autocmd().expect(MODEL_CHANGED_EVENT);
+    assert_eq!(event, MODEL_CHANGED_EVENT);
+    assert_eq!(data["model"]["spec"], serde_json::json!(OPUS_SPEC));
 }
 
 /// What `model_state` reports has to parse back into the same state, or a

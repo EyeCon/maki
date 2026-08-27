@@ -635,8 +635,8 @@ Listen for one or more events. Returns an id you can pass to
 
 Built-in events fired by the host: `"TurnStart"`, `"TurnEnd"`,
 `"TurnError"`, `"ToolStart"`, `"ToolDone"`, `"SessionReset"`,
-`"SessionFocusChanged"`, `"SessionStatusChanged"`, and
-`"TaskStatusChanged"`. Plugins can also fire their own events with
+`"SessionFocusChanged"`, `"SessionStatusChanged"`, `"TaskStatusChanged"`,
+and `"ModelChanged"`. Plugins can also fire their own events with
 `exec_autocmds`.
 
 Each host event carries `data.session_id`. For `"SessionReset"` that
@@ -650,7 +650,10 @@ between `"working"`, `"needs_input"`, and `"idle"`; it carries
 between `"working"`, `"done"`, and `"error"`; it carries `data.id` and
 `data.name` alongside `data.status`. A task that comes back from disk
 already finished stays quiet, so reloading a session does not replay
-old tasks.
+old tasks. `"ModelChanged"` fires when a session switches model, whoever
+asked for it; it carries `data.model` in the shape `maki.model.get`
+returns, plus `data.previous_spec`. Picking the model already in use stays
+quiet, and so does startup.
 
 **Parameters:**
 
