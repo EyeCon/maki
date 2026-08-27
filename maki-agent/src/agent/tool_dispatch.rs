@@ -19,7 +19,6 @@ use maki_config::ToolKey;
 
 const DOOM_LOOP_THRESHOLD: usize = 3;
 const DOOM_LOOP_MESSAGE: &str = "You have called this tool with identical input 3 times in a row. You are stuck in a loop. Break out and try a different approach.";
-const MCP_BLOCKED_IN_PLAN: &str = "MCP tools are not available in plan mode";
 const UNKNOWN_TOOL_PREFIX: &str = "unknown tool";
 const MCP_PERM_SCOPE_MAX_BYTES: usize = 200;
 
@@ -538,10 +537,6 @@ async fn execute_mcp_tool(
         annotation: None,
         written_path: None,
     };
-
-    if ctx.mode.plan_path().is_some() {
-        return done(MCP_BLOCKED_IN_PLAN.into(), true);
-    }
 
     let perm_tool = match ToolKey::parse(&tool) {
         Ok(k) => k,
@@ -1186,13 +1181,58 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_blocked_in_plan_mode() {
+    fn mcp_tool_allowed_in_plan_mode() {
         smol::block_on(async {
             let plan = AgentMode::Plan(PathBuf::from(PLAN_PATH));
             let ctx = with_mcp(stub_ctx(&plan), &stub_mcp(&[PROBE_QUALIFIED]));
             let done = dispatch(&ctx, PROBE_WIRE, &serde_json::json!({})).await;
-            assert!(done.is_error);
-            assert_eq!(done.output.as_text(), MCP_BLOCKED_IN_PLAN);
+            // The stub transport fails every call, so a successful run surfaces
+            // its error: the proof the call was neither plan-blocked nor
+            // permission-denied and actually reached MCP.
+            assert_eq!(done.tool.as_ref(), PROBE_QUALIFIED, "must route to MCP");
+            let text = done.output.as_text();
+            assert!(
+                !text.starts_with(PERMISSION_DENIED_PREFIX)
+                    && text != crate::tools::PLAN_WRITE_RESTRICTED,
+                "plan mode must not block or deny the call, got: {text}"
+            );
+            let mut tools = serde_json::json!([]);
+            ctx.mcp.as_ref().unwrap().extend_tools(&mut tools);
+            assert!(
+                tool_names(&tools).contains(&&PROBE_WIRE.to_owned()[..]),
+                "a permitted plan-mode call must load the definition"
+            );
+        });
+    }
+
+    #[test]
+    fn mcp_tool_denied_by_rule_in_plan_mode() {
+        smol::block_on(async {
+            let config = PermissionsConfig {
+                rules: vec![PermissionRule {
+                    tool: ToolKey::parse(PROBE_QUALIFIED).unwrap(),
+                    scope: None,
+                    effect: Effect::Deny,
+                }],
+                ..Default::default()
+            };
+            let permissions = Arc::new(PermissionManager::new(
+                config,
+                PathBuf::from(TEST_ROOT),
+                Arc::default(),
+            ));
+            let plan = AgentMode::Plan(PathBuf::from(PLAN_PATH));
+            let ctx = with_mcp(
+                stub_ctx_with_permissions(&plan, permissions),
+                &stub_mcp(&[PROBE_QUALIFIED]),
+            );
+            let done = dispatch(&ctx, PROBE_WIRE, &serde_json::json!({})).await;
+            assert!(done.is_error, "plan mode must not bypass deny rules");
+            assert!(
+                done.output.as_text().starts_with(PERMISSION_DENIED_PREFIX),
+                "got: {}",
+                done.output.as_text()
+            );
         });
     }
 
