@@ -168,7 +168,7 @@ fn byte_length(_lua: &Lua, this: &LuaNode) -> LuaResult<i64> {
 /// @return (Node|nil) Child node, or nil.
 #[lua_fn]
 fn child(_lua: &Lua, this: &LuaNode, index: u32) -> LuaResult<Option<LuaNode>> {
-    Ok(this.wrap_opt(this.ts_node()?.child(index)))
+    Ok(this.wrap_opt(this.ts_node()?.child(index as usize)))
 }
 
 /// Returns the named child at position {index} (0-based), skipping anonymous nodes.
@@ -178,7 +178,7 @@ fn child(_lua: &Lua, this: &LuaNode, index: u32) -> LuaResult<Option<LuaNode>> {
 /// @return (Node|nil) Named child node, or nil.
 #[lua_fn]
 fn named_child(_lua: &Lua, this: &LuaNode, index: u32) -> LuaResult<Option<LuaNode>> {
-    Ok(this.wrap_opt(this.ts_node()?.named_child(index)))
+    Ok(this.wrap_opt(this.ts_node()?.named_child(index as usize)))
 }
 
 /// Returns the total number of children, including anonymous nodes.
@@ -240,11 +240,11 @@ fn named_children(lua: &Lua, this: &LuaNode) -> LuaResult<mlua::Table> {
 #[lua_fn]
 fn iter_children(lua: &Lua, this: &LuaNode) -> LuaResult<Function> {
     let node = this.ts_node()?;
-    let count = node.child_count() as u32;
-    let mut entries: Vec<(LuaNode, Option<String>)> = Vec::with_capacity(count as usize);
+    let count = node.child_count();
+    let mut entries: Vec<(LuaNode, Option<String>)> = Vec::with_capacity(count);
     for i in 0..count {
         if let Some(child) = node.child(i) {
-            let field = node.field_name_for_child(i).map(str::to_owned);
+            let field = node.field_name_for_child(i as u32).map(str::to_owned);
             entries.push((this.wrap(child), field));
         }
     }
