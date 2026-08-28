@@ -34,6 +34,7 @@ pub enum Language {
     Hcl,
     Json,
     Make,
+    Nim,
 }
 
 impl Language {
@@ -71,6 +72,7 @@ impl Language {
             "hcl" => Some(Self::Hcl),
             "json" => Some(Self::Json),
             "make" => Some(Self::Make),
+            "nim" => Some(Self::Nim),
             _ => None,
         }
     }
@@ -109,6 +111,7 @@ impl Language {
             "hcl" | "tf" | "tfvars" => Some(Self::Hcl),
             "json" => Some(Self::Json),
             "mk" => Some(Self::Make),
+            "nim" | "nims" | "nimble" => Some(Self::Nim),
             _ => None,
         }
     }
@@ -147,6 +150,7 @@ impl Language {
             Self::Hcl => tree_sitter_hcl::LANGUAGE.into(),
             Self::Json => tree_sitter_json::LANGUAGE.into(),
             Self::Make => tree_sitter_make::LANGUAGE.into(),
+            Self::Nim => tree_sitter_nim::language(),
         }
     }
 }
