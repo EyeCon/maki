@@ -3876,6 +3876,7 @@ dependencies = [
  "tree-sitter-lua",
  "tree-sitter-make",
  "tree-sitter-md",
+ "tree-sitter-nim",
  "tree-sitter-nix",
  "tree-sitter-php",
  "tree-sitter-python",
@@ -7610,12 +7611,13 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.27.1"
+version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5129de2ccc97808c4583d48f1fb44576d015cf241e432800572bda11ef30c3b"
+checksum = "78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87"
 dependencies = [
  "cc",
  "regex",
+ "regex-syntax",
  "serde_json",
  "streaming-iterator",
  "tree-sitter-language",
@@ -7825,6 +7827,15 @@ checksum = "8ed661bfe3c264961425f77cd89ad2998bf5d629e71ce8bab1e5d7e940d6246e"
 dependencies = [
  "cc",
  "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-nim"
+version = "0.6.2"
+source = "git+https://github.com/alaviss/tree-sitter-nim?rev=ac72ba30d16edf0be021588a9301ede4accd6cf4#ac72ba30d16edf0be021588a9301ede4accd6cf4"
+dependencies = [
+ "cc",
+ "tree-sitter",
 ]
 
 [[package]]
