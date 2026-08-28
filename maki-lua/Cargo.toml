@@ -79,6 +79,7 @@ tree-sitter-css = { workspace = true }
 tree-sitter-hcl = { workspace = true }
 tree-sitter-json = { workspace = true }
 tree-sitter-make = { workspace = true }
+tree-sitter-nim = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }
