@@ -475,7 +475,7 @@ impl RuleQuery {
     /// `#set! injection.language`.
     fn content_lang<'a>(&'a self, m: &QueryMatch<'_, '_>, text: &'a str) -> Option<&'a str> {
         let caught = self.language_capture.and_then(|index| {
-            m.captures()
+            m.captures
                 .iter()
                 .find(|capture| capture.index == index)
                 .map(|capture| text[capture.node.byte_range()].trim())
@@ -612,13 +612,13 @@ impl Run<'_> {
         if !predicates_hold(
             &query.query,
             m.pattern_index,
-            m.captures(),
+            m.captures,
             source,
             &mut self.regex_cache,
         ) {
             return;
         }
-        for capture in m.captures() {
+        for capture in m.captures {
             let rank = query.rank(self.rank, m.pattern_index, capture.index);
             let bytes = capture.node.byte_range();
             match &query.captures[capture.index as usize] {
