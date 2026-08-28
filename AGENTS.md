@@ -42,10 +42,6 @@ Read `justfile` for more.
 
 Dev builds skip debug info for deps and vendored C (our crates keep it); to debug into a dep set `[profile.dev.package.<name>] debug = true`.
 
-## Nix
-
-`nix develop` (dev shell), `nix build`, `nix fmt` (nixfmt), `nix flake check` (includes git-dep-hashes drift).
-
 ## Architecture
 
 Rust workspace, key crates in root dir:
