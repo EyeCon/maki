@@ -152,7 +152,7 @@ open = "5"
 criterion = { version = "0.5", features = ["html_reports"] }
 etcetera = "0.11"
 dotenvy = "0.15"
-tree-sitter = "0.26"
+tree-sitter = "0.25"
 include_dir = "0.7"
 mlua = { version = "0.11", features = ["luau", "luau-jit", "async", "send", "serde", "macros"] }
 tree-sitter-bash = "0.25"
@@ -187,6 +187,9 @@ tree-sitter-css = "0.25"
 tree-sitter-hcl = "1.1"
 tree-sitter-json = "0.24"
 tree-sitter-make = "1.1"
+# Not on crates.io (the registry's tree-sitter-nim is an unrelated toy grammar).
+# Rev-pinned rather than tagged: main is ahead of the 0.6.2 tag with grammar fixes.
+tree-sitter-nim = { git = "https://github.com/alaviss/tree-sitter-nim", rev = "ac72ba30d16edf0be021588a9301ede4accd6cf4" }
 monty = { git = "https://github.com/pydantic/monty.git", tag = "v0.0.21", package = "monty" }
 monty-types = { git = "https://github.com/pydantic/monty.git", tag = "v0.0.21", package = "monty-types" }
 get-size2 = "=0.10.1"
