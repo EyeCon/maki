@@ -73,6 +73,7 @@ impl From<Usage> for TokenUsage {
             output: u.output_tokens,
             cache_creation: u.cache_creation_input_tokens,
             cache_read: u.cache_read_input_tokens,
+            ..Default::default()
         }
     }
 }

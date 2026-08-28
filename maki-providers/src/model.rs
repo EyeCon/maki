@@ -107,6 +107,20 @@ impl ModelPricing {
     /// Cache multipliers Anthropic applies on top of the base input rate.
     const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
     const CACHE_READ_MULTIPLIER: f64 = 0.10;
+
+    /// Fast mode only ever quotes two rates, so its cache rates come off its own
+    /// input rate rather than the standard one they no longer relate to.
+    fn rates(&self, fast: bool) -> (f64, f64, f64, f64) {
+        match &self.fast {
+            Some(f) if fast => (
+                f.input,
+                f.output,
+                f.input * Self::CACHE_WRITE_MULTIPLIER,
+                f.input * Self::CACHE_READ_MULTIPLIER,
+            ),
+            _ => (self.input, self.output, self.cache_write, self.cache_read),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,10 +410,19 @@ impl Model {
     ///
     /// `None` on an unpriced model (oauth, local), so callers can hide the cost
     /// instead of showing a misleading "$0.000".
+    ///
+    /// A bill the provider sent us is the whole answer, so it skips both the
+    /// table and the surcharge: it is already the price at this hour, and we
+    /// have one even for a model nothing ever quoted a rate for. Except a bill
+    /// of zero, which is all a free model ever sends, and free has always shown
+    /// no cost rather than "$0.000".
     pub fn billed_cost(&self, usage: &TokenUsage, fast: bool) -> Option<f64> {
-        let cost = self.list_cost(usage, fast)?;
-        let schedule = ManifestRegistry::for_slug(&self.provider).and_then(|m| m.pricing_schedule);
-        Some(schedule.map_or(cost, |s| cost * s.multiplier_at(Timestamp::now())))
+        usage.cost.filter(|bill| *bill > 0.0).or_else(|| {
+            let cost = self.list_cost(usage, fast)?;
+            let schedule =
+                ManifestRegistry::for_slug(&self.provider).and_then(|m| m.pricing_schedule);
+            Some(schedule.map_or(cost, |s| cost * s.multiplier_at(Timestamp::now())))
+        })
     }
 
     /// The quoted rates, with no wall-clock surcharge. Deterministic, which is
@@ -407,7 +430,7 @@ impl Model {
     /// what they paid: the rate back then is unknown, and the table price is
     /// the honest guess.
     pub fn list_cost(&self, usage: &TokenUsage, fast: bool) -> Option<f64> {
-        (!self.pricing.is_zero()).then(|| usage.cost(&self.pricing, fast))
+        (!self.pricing.is_zero()).then(|| usage.estimate(&self.pricing, fast))
     }
 
     pub fn provider_display_name(&self) -> &'static str {
@@ -544,6 +567,15 @@ pub struct TokenUsage {
     pub cache_creation: u32,
     #[serde(rename = "cache_read_input_tokens")]
     pub cache_read: u32,
+    /// What this one response cost, straight from the provider, when it bothers
+    /// to say (OpenRouter's `usage.cost`). Worth preferring on a router, where
+    /// our table prices the model we asked for and the router bills for
+    /// whichever upstream it picked.
+    ///
+    /// One response only, so it is neither summed nor stored. Sessions add up
+    /// their bill a turn at a time in [`StoredTokenUsage::cost`].
+    #[serde(skip)]
+    pub cost: Option<f64>,
 }
 
 impl From<StoredTokenUsage> for TokenUsage {
@@ -553,6 +585,9 @@ impl From<StoredTokenUsage> for TokenUsage {
             output: s.output,
             cache_creation: s.cache_creation,
             cache_read: s.cache_read,
+            // A stored cost belongs to a whole session and this field to one
+            // response, so there is nothing honest to carry across.
+            cost: None,
         }
     }
 }
@@ -603,22 +638,9 @@ impl TokenUsage {
     }
 
     /// Crate-private on purpose: pricing outside [`Model`] skips the provider's
-    /// schedule.
-    pub(crate) fn cost(&self, pricing: &ModelPricing, fast: bool) -> f64 {
-        let (input, output, cache_write, cache_read) = match &pricing.fast {
-            Some(f) if fast => (
-                f.input,
-                f.output,
-                f.input * ModelPricing::CACHE_WRITE_MULTIPLIER,
-                f.input * ModelPricing::CACHE_READ_MULTIPLIER,
-            ),
-            _ => (
-                pricing.input,
-                pricing.output,
-                pricing.cache_write,
-                pricing.cache_read,
-            ),
-        };
+    /// schedule, and the bill it may have sent us.
+    pub(crate) fn estimate(&self, pricing: &ModelPricing, fast: bool) -> f64 {
+        let (input, output, cache_write, cache_read) = pricing.rates(fast);
         self.input as f64 * input / PER_MILLION
             + self.output as f64 * output / PER_MILLION
             + self.cache_creation as f64 * cache_write / PER_MILLION
@@ -640,6 +662,9 @@ impl AddAssign for TokenUsage {
         self.output = self.output.saturating_add(rhs.output);
         self.cache_creation = self.cache_creation.saturating_add(rhs.cache_creation);
         self.cache_read = self.cache_read.saturating_add(rhs.cache_read);
+        // Only some responses arrive with a bill, so a running total of them is
+        // part paid and part missing while looking like the lot.
+        self.cost = None;
     }
 }
 
@@ -680,6 +705,7 @@ mod tests {
         output: 0,
         cache_creation: 0,
         cache_read: 0,
+        cost: None,
     };
     /// Four counters that cannot be confused with each other.
     const COUNTERS: TokenUsage = TokenUsage {
@@ -687,9 +713,12 @@ mod tests {
         output: 22,
         cache_creation: 33,
         cache_read: 44,
+        cost: None,
     };
     const RECORDED_COST: f64 = 0.25;
     const FREE_MEANS_A_KNOWN_ZERO: &str = "only a price discovery reported as zero means free";
+    const TABLE_MUST_NOT_AGREE_BY_LUCK: &str =
+        "the table has to disagree, or preferring the bill proves nothing";
     const PAID_PRICING: ModelPricing = ModelPricing {
         input: 3.0,
         output: 15.0,
@@ -706,9 +735,9 @@ mod tests {
         assert_eq!(format_tokens(tokens), expected);
     }
 
-    #[test_case(TokenUsage { input: 12_000, output: 456, cache_creation: 200, cache_read: 100 }, None, "12.3k↑ 456↓" ; "without_cost")]
-    #[test_case(TokenUsage { input: 1_000_000, output: 100_000, cache_creation: 200_000, cache_read: 500_000 }, Some(5.4), "1.7m↑ 100.0k↓ $5.400" ; "with_cost")]
-    #[test_case(TokenUsage { input: u32::MAX, output: 1, cache_creation: 1, cache_read: 1 }, None, "4295.0m↑ 1↓" ; "input_saturates")]
+    #[test_case(TokenUsage { input: 12_000, output: 456, cache_creation: 200, cache_read: 100, cost: None }, None, "12.3k↑ 456↓" ; "without_cost")]
+    #[test_case(TokenUsage { input: 1_000_000, output: 100_000, cache_creation: 200_000, cache_read: 500_000, cost: None }, Some(5.4), "1.7m↑ 100.0k↓ $5.400" ; "with_cost")]
+    #[test_case(TokenUsage { input: u32::MAX, output: 1, cache_creation: 1, cache_read: 1, cost: None }, None, "4295.0m↑ 1↓" ; "input_saturates")]
     fn usage_formatting(usage: TokenUsage, cost: Option<f64>, expected: &str) {
         assert_eq!(usage.format(cost), expected);
     }
@@ -720,6 +749,7 @@ mod tests {
             output: 456,
             cache_creation: 200,
             cache_read: 100,
+            ..Default::default()
         };
         assert_eq!(usage.format_sum_cost(Some(1.5)), "12.3k↑ 456↓ Σ$1.500");
         assert_eq!(usage.format_sum_cost(None), usage.format(None));
@@ -793,12 +823,13 @@ mod tests {
             output: 1_000,
             cache_creation: 10_000,
             cache_read: 150_000,
+            ..Default::default()
         };
         assert_eq!(usage.total_input(), 165_000);
     }
 
     #[test]
-    fn cost_computes_all_token_types() {
+    fn estimate_computes_all_token_types() {
         let pricing = ModelPricing {
             input: 3.00,
             output: 15.00,
@@ -811,10 +842,46 @@ mod tests {
             output: 100_000,
             cache_creation: 200_000,
             cache_read: 500_000,
+            ..Default::default()
         };
-        let cost = usage.cost(&pricing, false);
+        let cost = usage.estimate(&pricing, false);
         let expected = 3.0 + 1.5 + 0.75 + 0.15;
         assert!((cost - expected).abs() < 1e-10);
+    }
+
+    /// A bill wins outright, and the two ways it used to get lost are the two
+    /// cases here: DeepSeek would have scaled it by the hour on top, and an
+    /// unpriced model would have thrown it away for having no rate to quote.
+    #[test_case(DEEPSEEK_SPEC ; "priced_and_scheduled")]
+    #[test_case(UNPRICED_DEEPSEEK_SPEC ; "unpriced")]
+    fn a_reported_cost_is_the_whole_answer(spec: &str) {
+        let model = Model::from_spec(spec).unwrap();
+        let billed = TokenUsage {
+            cost: Some(RECORDED_COST),
+            ..INPUT_ONLY
+        };
+        assert_ne!(
+            model.billed_cost(&INPUT_ONLY, false),
+            Some(RECORDED_COST),
+            "{TABLE_MUST_NOT_AGREE_BY_LUCK}"
+        );
+        assert_eq!(model.billed_cost(&billed, false), Some(RECORDED_COST));
+    }
+
+    /// Only some responses arrive with a bill, so a total of them would be part
+    /// paid and part missing while looking like the whole session.
+    #[test]
+    fn adding_usage_sums_counters_and_drops_the_bill() {
+        let mut total = TokenUsage {
+            cost: Some(RECORDED_COST),
+            ..COUNTERS
+        };
+        total += TokenUsage {
+            cost: Some(RECORDED_COST),
+            ..COUNTERS
+        };
+        assert_eq!(total.input, COUNTERS.input * 2);
+        assert_eq!(total.cost, None);
     }
 
     #[test]
@@ -834,11 +901,12 @@ mod tests {
             output: 1_000_000,
             cache_creation: 1_000_000,
             cache_read: 1_000_000,
+            ..Default::default()
         };
-        let fast = usage.cost(&pricing, true);
+        let fast = usage.estimate(&pricing, true);
         let expected = 30.0 + 150.0 + 37.5 + 3.0;
         assert!((fast - expected).abs() < 1e-10);
-        assert!(fast > usage.cost(&pricing, false));
+        assert!(fast > usage.estimate(&pricing, false));
     }
 
     #[test]
@@ -855,8 +923,12 @@ mod tests {
             output: 1_000_000,
             cache_creation: 0,
             cache_read: 0,
+            ..Default::default()
         };
-        assert_eq!(usage.cost(&pricing, true), usage.cost(&pricing, false));
+        assert_eq!(
+            usage.estimate(&pricing, true),
+            usage.estimate(&pricing, false)
+        );
     }
 
     #[test]
@@ -1161,13 +1233,19 @@ mod tests {
     }
 
     /// A schedule must not turn "no price" into "$0.000". Callers hide `None`,
-    /// and any multiple of nothing is still nothing.
+    /// and any multiple of nothing is still nothing. A free model billing us
+    /// zero lands in the same place, which is where it has always been.
     #[test]
     fn unpriced_models_stay_unpriced_under_a_schedule() {
         let model = Model::from_spec(UNPRICED_DEEPSEEK_SPEC).unwrap();
+        let free = TokenUsage {
+            cost: Some(0.0),
+            ..INPUT_ONLY
+        };
         assert!(model.pricing.is_zero());
         assert_eq!(model.list_cost(&INPUT_ONLY, false), None);
         assert_eq!(model.billed_cost(&INPUT_ONLY, false), None);
+        assert_eq!(model.billed_cost(&free, false), None);
     }
 
     /// Every later total is rebuilt from what was stored, so storing a turn must

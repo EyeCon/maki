@@ -1260,6 +1260,7 @@ mod tests {
             output,
             cache_creation: 0,
             cache_read: 0,
+            cost: None,
         };
         let cost = Model::from_spec(spec)
             .unwrap()

@@ -548,6 +548,7 @@ fn parse_usage(u: &Value) -> TokenUsage {
         output: output_tokens,
         cache_read: cached,
         cache_creation: 0,
+        cost: None,
     }
 }
 

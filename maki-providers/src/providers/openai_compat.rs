@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use flume::Sender;
 use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 
@@ -469,6 +469,21 @@ struct ChunkUsage {
     /// DeepSeek reports cache hits here instead of `prompt_tokens_details`.
     #[serde(default)]
     prompt_cache_hit_tokens: u32,
+    /// What the request billed, which routers like OpenRouter attach to usage.
+    #[serde(default, deserialize_with = "lenient_cost")]
+    cost: Option<f64>,
+}
+
+/// No standard covers `cost`, so a gateway may quote it as a string or in a
+/// shape we have never seen. A chunk we cannot parse is dropped whole, and this
+/// is the chunk carrying the turn's token counts, so reading the price has to
+/// be allowed to fail on its own.
+fn lenient_cost<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => s.parse().ok(),
+        _ => None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -534,6 +549,7 @@ pub async fn parse_sse(
                 output: u.completion_tokens,
                 cache_read: cached,
                 cache_creation: 0,
+                cost: u.cost,
             };
         }
 
@@ -717,6 +733,8 @@ mod tests {
     use test_case::test_case;
 
     const TEST_STREAM_TIMEOUT: Duration = Duration::from_secs(300);
+    const COUNTS_SURVIVE_A_BAD_COST: &str =
+        "a price we cannot read must not take the token counts down with it";
 
     #[test]
     fn default_model_parser_reads_context_and_output_length() {
@@ -792,6 +810,32 @@ data: [DONE]\n";
             assert_eq!(resp.usage.input, 20);
             assert_eq!(resp.usage.cache_read, 80);
             assert_eq!(resp.usage.output, 10);
+        })
+    }
+
+    /// OpenRouter quotes the bill on the same chunk as the token counts, so the
+    /// counts have to come through whatever it says the price is.
+    #[test_case(json!(0.00045), Some(0.00045)   ; "number")]
+    #[test_case(json!("0.00045"), Some(0.00045) ; "quoted_number")]
+    #[test_case(json!("free"), None             ; "unparsable_string")]
+    #[test_case(json!({"usd": 0.00045}), None   ; "unknown_shape")]
+    #[test_case(json!(null), None               ; "null")]
+    fn parse_sse_cost_from_usage(cost: Value, expected: Option<f64>) {
+        smol::block_on(async {
+            let chunk = json!({
+                "choices": [{"finish_reason": "stop", "delta": {}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 10, "cost": cost},
+            });
+            let sse = format!("data: {chunk}\n\ndata: [DONE]\n");
+
+            let (tx, _rx) = flume::unbounded();
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+                .await
+                .unwrap();
+
+            assert_eq!(resp.usage.input, 100, "{COUNTS_SURVIVE_A_BAD_COST}");
+            assert_eq!(resp.usage.output, 10, "{COUNTS_SURVIVE_A_BAD_COST}");
+            assert_eq!(resp.usage.cost, expected);
         })
     }
 
