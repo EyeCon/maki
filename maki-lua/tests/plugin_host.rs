@@ -2392,6 +2392,50 @@ fn unloading_plugin_kills_its_jobs() {
     }
 }
 
+/// The shell exits at once and leaves `sleep` holding the pipe, so the direct
+/// child dies long before the job does. Reaping it there gives the pid back to
+/// the kernel and turns every later kill into a no-op.
+#[cfg(unix)]
+#[test]
+fn unloading_plugin_kills_a_job_whose_shell_already_exited() {
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_path = dir.path().join("group.pid");
+    let src = format!(
+        r#"maki.fn.jobstart("sleep 30 & printf %s $$ > '{}'", {{
+            scope = "plugin",
+        }})"#,
+        pid_path.display()
+    );
+    host.load_source("plugin_job", &src).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_path)
+            .unwrap_or_default()
+            .parse::<i32>()
+        {
+            break Pid::from_raw(pid).unwrap();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "plugin job did not publish its process group"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    host.unload("plugin_job").unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while test_kill_process_group(pid).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "backgrounded process survived unload"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn jobinfo_and_joblist_see_live_plugin_jobs() {
     let reg = fresh_registry();

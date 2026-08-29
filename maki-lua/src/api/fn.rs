@@ -348,14 +348,18 @@ impl JobStore {
         thread::Builder::new()
             .name("job-wait".into())
             .spawn(move || {
-                let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-                wait_reaped.store(true, Ordering::Relaxed);
+                // Reaping frees the pid, and that pid is the process group
+                // `kill_job` signals. The readers only return once every
+                // descendant dropped the pipes, so joining them first keeps a
+                // kill target around for as long as the job is really alive.
                 if let Some(h) = stdout_handle {
                     let _ = h.join();
                 }
                 if let Some(h) = stderr_handle {
                     let _ = h.join();
                 }
+                let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+                wait_reaped.store(true, Ordering::Relaxed);
                 let _ = event_tx.send(JobEvent::Exit(code));
             })
             .map_err(|e| e.to_string())?;
@@ -783,10 +787,10 @@ fn shell_command(cmd: &str) -> Command {
 }
 
 /// Signalling a reaped pid would hit whoever the kernel handed it to next, so
-/// skip the jobs the wait thread already reaped. The flag carries no data of
-/// its own, hence `Relaxed`. It narrows the window to the few instructions
-/// after `wait` returns rather than closing it, which would take a pidfd, and
-/// a pidfd cannot express `killpg`.
+/// skip the jobs the wait thread already reaped. Until then the child is a
+/// zombie, and a zombie group leader keeps its pid and pgid off the free list,
+/// so the group is still the right target. The flag carries no data of its
+/// own, hence `Relaxed`.
 fn kill_job(job: &JobMeta) {
     if job.reaped.load(Ordering::Relaxed) {
         return;
