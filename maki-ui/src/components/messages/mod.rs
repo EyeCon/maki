@@ -49,8 +49,6 @@ use ratatui::text::{Line, Span};
 use tracing::warn;
 
 const REFLOW_MARGIN_VIEWPORTS: u32 = 1;
-/// Spacer plus instruction segment, inserted as a pair.
-const INSTRUCTION_SEGMENTS: usize = 2;
 
 #[derive(Clone, Copy)]
 pub struct PromptProgress {
@@ -357,16 +355,14 @@ impl MessagesPanel {
         self.update_tool(tool_id, |msg| msg.turn_usage = Some(usage));
     }
 
-    fn upsert_instruction_segment(
-        &mut self,
-        parent_id: &str,
-        blocks: &[InstructionBlock],
-        parent_idx: usize,
-    ) {
+    fn upsert_instruction_segment(&mut self, parent_id: &str, blocks: &[InstructionBlock]) {
         if blocks.is_empty() {
             return;
         }
         let inst_id = segment::instruction_id(parent_id);
+        let Some(seg_idx) = self.cache.find_by_tool_id(&inst_id) else {
+            return;
+        };
         let exp = self
             .expanded_tools
             .get(&inst_id)
@@ -374,25 +370,16 @@ impl MessagesPanel {
             .unwrap_or_default();
         let tl = build_instructions_lines(blocks, self.viewport_width, exp.output);
 
-        if let Some(seg_idx) = self.cache.find_by_tool_id(&inst_id) {
-            let seg = self.cache.get_mut(seg_idx).unwrap();
-            seg.search_text = tl.search_text.clone();
-            seg.update_with_reuse(tl, &self.hl_worker);
-        } else {
-            let mut seg = Segment::with_tool(inst_id);
-            seg.search_text = tl.search_text.clone();
-            seg.apply_highlight(tl, &self.hl_worker);
-            let at = parent_idx + 1;
-            self.cache.insert(at, Segment::spacer());
-            self.cache.insert(at + 1, seg);
-            // Instructions arrive with the tool's output, so a tool finishing
-            // beside slower siblings inserts above segments that already
-            // exist. The scroll position names one by index, and left alone it
-            // would quietly start naming the segment two slots higher.
-            if self.scroll.seg >= at {
-                self.scroll.seg += INSTRUCTION_SEGMENTS;
-            }
+        // The spacer gets its line only now. Empty means no rows, so a tool
+        // that never sends instructions leaves no gap behind.
+        if let Some(spacer) = self.cache.get_mut(seg_idx - 1)
+            && spacer.lines().is_empty()
+        {
+            spacer.set_lines(vec![Line::default()]);
         }
+        let seg = self.cache.get_mut(seg_idx).unwrap();
+        seg.search_text = tl.search_text.clone();
+        seg.update_with_reuse(tl, &self.hl_worker);
     }
 
     fn update_tool(&mut self, tool_id: &str, update_msg: impl FnOnce(&mut DisplayMessage)) {
@@ -726,10 +713,9 @@ impl MessagesPanel {
     fn rebuild_expanded_tool(&mut self, tool_id: &str) {
         if segment::is_instruction_segment(tool_id) {
             if let Some(parent_id) = segment::instruction_parent(tool_id)
-                && let Some(parent_idx) = self.cache.find_by_tool_id(parent_id)
                 && let Some(blocks) = self.get_instructions_for_tool(parent_id)
             {
-                self.upsert_instruction_segment(parent_id, &blocks, parent_idx);
+                self.upsert_instruction_segment(parent_id, &blocks);
             }
         } else {
             self.rebuild_tool_segment(tool_id);
@@ -1347,7 +1333,7 @@ impl MessagesPanel {
         seg.update_with_reuse(tl, &self.hl_worker);
 
         if let Some(blocks) = instructions {
-            self.upsert_instruction_segment(tool_id, &blocks, seg_idx);
+            self.upsert_instruction_segment(tool_id, &blocks);
         }
     }
 
@@ -1369,14 +1355,14 @@ impl MessagesPanel {
                 seg.search_text = search_text;
                 seg.apply_highlight(tl, &self.hl_worker);
                 self.cache.push(seg);
+                self.cache.reserve_instructions(&id);
 
                 let blocks = msg
                     .tool_output
                     .as_deref()
                     .and_then(|o| o.owned_instructions());
                 if let Some(blocks) = blocks {
-                    let last_idx = self.cache.len().saturating_sub(1);
-                    self.upsert_instruction_segment(&id, &blocks, last_idx);
+                    self.upsert_instruction_segment(&id, &blocks);
                 }
             } else {
                 if matches!(&msg.role, DisplayRole::Thinking) && msg.thinking_collapsed {
