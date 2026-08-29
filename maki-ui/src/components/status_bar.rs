@@ -171,9 +171,20 @@ impl StatusBar {
 
         let mut right_spans = Vec::new();
 
+        // An error takes the whole bar over. The label saying the agent
+        // approves everything has to survive that, so it is built out here
+        // and both arms place it.
+        let yolo_span = ctx.yolo.then(|| {
+            Span::styled(
+                YOLO_LABEL,
+                theme::dim_style(theme::current().error, YOLO_DIM_FACTOR),
+            )
+        });
+
         match ctx.status {
             Status::Error { message: e, .. } => {
                 left_spans.push(Span::styled(format!(" {e}"), theme::current().error));
+                right_spans.extend(yolo_span);
             }
             _ => {
                 let pct = if ctx.stats.context_window > 0 {
@@ -197,12 +208,7 @@ impl StatusBar {
                 if ctx.workflow {
                     rest_spans.push(Span::styled(WORKFLOW_LABEL, theme::current().status_dim));
                 }
-                if ctx.yolo {
-                    rest_spans.push(Span::styled(
-                        YOLO_LABEL,
-                        theme::dim_style(theme::current().error, YOLO_DIM_FACTOR),
-                    ));
-                }
+                rest_spans.extend(yolo_span);
 
                 let context_text = format!(
                     "  {}/{} ({}%)",
@@ -371,11 +377,20 @@ mod tests {
     const SIGMA: char = '\u{03a3}';
 
     fn render(global_cost: Option<f64>, show_global: bool, yolo: bool) -> String {
+        render_status(&Status::Idle, global_cost, show_global, yolo)
+    }
+
+    fn render_status(
+        status: &Status,
+        global_cost: Option<f64>,
+        show_global: bool,
+        yolo: bool,
+    ) -> String {
         let bar = StatusBar::new(FLASH_TTL);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(BAR_WIDTH, 1)).unwrap();
         let ctx = StatusBarContext {
-            status: &Status::Idle,
+            status,
             mode_label: "build".into(),
             mode_style: Style::new(),
             model_id: MODEL_ID,
@@ -427,6 +442,16 @@ mod tests {
     #[test_case(false => false ; "a_prompting_session_stays_quiet")]
     fn the_bar_advertises_yolo(yolo: bool) -> bool {
         render(None, false, yolo).contains(YOLO_LABEL.trim())
+    }
+
+    #[test]
+    fn an_error_does_not_hide_yolo() {
+        let status = Status::Error {
+            message: "something went wrong".into(),
+            since: Instant::now(),
+        };
+        let text = render_status(&status, None, false, true);
+        assert!(text.contains(YOLO_LABEL.trim()), "{text}");
     }
 
     #[test_case("/home/user/projects/app", "/home/user", "~/projects/app" ; "inside_home")]
