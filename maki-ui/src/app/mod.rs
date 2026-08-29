@@ -348,6 +348,10 @@ impl App {
                 .filter(|spec| model_policy.allows(spec))
                 .collect(),
         );
+        // The manager arrives forked from the prototype the process was
+        // started with, so a tab that resumes or spawns blank runs on
+        // `--yolo` until its own meta is read back here.
+        app.apply_stored_permissions(&app.state.session.meta);
         app
     }
 

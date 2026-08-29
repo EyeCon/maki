@@ -351,8 +351,9 @@ struct SpawnCtx {
     config: AgentConfig,
     ui_config: UiConfig,
     input_history_size: usize,
-    /// Prototype only: every runtime forks its own manager so session
-    /// rules stay per-session.
+    /// Prototype only: every runtime forks its own manager so session rules
+    /// stay per-session. `App::new` then restates the fork from the session's
+    /// meta, so a toggle the prototype never heard about still holds.
     permissions: Arc<PermissionManager>,
     timeouts: Timeouts,
     custom_commands: Arc<[CustomCommand]>,

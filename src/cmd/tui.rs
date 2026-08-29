@@ -97,7 +97,6 @@ fn load_config(
         .into_config(&names(plugin_host)?)
         .context("invalid config")?;
     config.permissions = load_permissions(cwd);
-    config.permissions = load_permissions(cwd);
 
     if cli.yolo || config.always_yolo {
         config.permissions.yolo = true;
