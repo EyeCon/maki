@@ -138,6 +138,10 @@ Run `maki acp` or configure your ACP supporting editor to use maki, e.g. in [Zed
 
 More info at the [official docs](https://maki.sh/docs).
 
+## Community
+
+[![Discord](https://img.shields.io/discord/1543246528876126218?logo=discord&logoColor=white&label=discord&color=5865F2)](https://discord.gg/dEBhANTbX)
+
 ## Example config
 
 [tontinton/makiconf](https://github.com/tontinton/makiconf) - includes a [semble](https://github.com/MinishLab/semble) tool (Lua code) for semantic code search, and an [ast-grep](https://ast-grep.github.io) MCP server for AST-based search and replace.
