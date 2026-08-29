@@ -580,8 +580,9 @@ async fn session(
     let name = name.unwrap_or_default();
     info!(name = %name, model = %model.id, "subagent session opened");
 
-    // The array is the caller's, so only the filter half is derived here; it is
-    // what tells the session which names it may dispatch.
+    // The array is the caller's, and the filter comes out of it, so whatever
+    // the caller left out is also a name this session cannot dispatch or bind
+    // inside its sandbox.
     let tools = RequestTools::assembled(tools_json, &agent_ctx.config, &model);
 
     let state = SessionState {

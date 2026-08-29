@@ -743,7 +743,8 @@ mod tests {
     };
     use crate::tools::{
         BoxFuture, DescriptionContext, ExecFuture, HeaderFuture, HeaderResult, ParseError,
-        PermissionScopes, RequestTools, Tool, ToolAudience, ToolExecResult, local_tool,
+        PermissionScopes, RequestTools, TOOL_NAME_FIELD, Tool, ToolAudience, ToolExecResult,
+        local_tool,
     };
 
     const TEST_ID: &str = "t1";
@@ -1126,6 +1127,23 @@ mod tests {
         ctx.tool_filter = Arc::clone(tools.filter());
 
         assert_eq!(tool_names(tools.definitions()), [OTHER_WIRE]);
+        assert_eq!(callable_names(&ctx), [OTHER_WIRE]);
+    }
+
+    /// A host that trims the array it publishes (a Lua caller passing `except`)
+    /// has answered for the sandbox too, because the filter comes off that same
+    /// array.
+    #[test]
+    fn callable_drops_a_name_the_published_array_left_out() {
+        let mut ctx = stub_ctx(&AgentMode::Build);
+        ctx.registry = registry_with(&[PROBE_WIRE, OTHER_WIRE]);
+        let tools = RequestTools::assembled(
+            serde_json::json!([{ TOOL_NAME_FIELD: OTHER_WIRE }]),
+            &ctx.config,
+            &ctx.model,
+        );
+        ctx.tool_filter = Arc::clone(tools.filter());
+
         assert_eq!(callable_names(&ctx), [OTHER_WIRE]);
     }
 

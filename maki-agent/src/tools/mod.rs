@@ -40,6 +40,8 @@ use maki_providers::RequestOptions;
 use maki_providers::provider::Provider;
 use maki_storage::id::SessionRef;
 
+pub(crate) const TOOL_NAME_FIELD: &str = "name";
+
 /// Who made a tool call. A resumed session rebuilds its state from the `ToolUse`
 /// blocks in history, and those hold the model's own calls only, so a nested
 /// call must never change what the next request carries.
@@ -172,11 +174,30 @@ impl RequestTools {
     }
 
     /// For an array the host built itself, like a Lua subagent publishing what
-    /// its caller picked. Dispatch still answers to the config's own filter.
+    /// its caller picked. The filter is read back off that array, so the names
+    /// the model was shown and the names a script may reach are one set, and
+    /// the caller's `only`/`except` never has to be passed twice. MCP names are
+    /// never matched against this filter and stay reachable.
+    ///
+    /// An array nobody can read a name out of says nothing about intent, so it
+    /// falls back to the config's filter instead of an `Only` of nothing that
+    /// would leave the session unable to do anything. An array that is
+    /// genuinely empty is an answer, and is kept as one.
     pub fn assembled(definitions: Value, config: &AgentConfig, model: &Model) -> Self {
+        let published: Option<Vec<String>> = definitions.as_array().and_then(|defs| {
+            let names: Vec<String> = defs
+                .iter()
+                .filter_map(|def| def[TOOL_NAME_FIELD].as_str().map(str::to_owned))
+                .collect();
+            (defs.is_empty() || !names.is_empty()).then_some(names)
+        });
+        let filter = published.map_or_else(
+            || ToolFilter::from_config(config, model, &[]),
+            ToolFilter::Only,
+        );
         Self {
             definitions,
-            filter: Arc::new(ToolFilter::from_config(config, model, &[])),
+            filter: Arc::new(filter),
         }
     }
 
@@ -742,11 +763,30 @@ mod tests {
     use super::*;
 
     const LINE_LIMIT: usize = 500;
+    const TEST_MODEL_SPEC: &str = "anthropic/claude-opus-4-8";
+
+    /// The array a host hands in is the whole answer, but only where names can
+    /// be read out of it. Something unreadable must not quietly come out as
+    /// "no tools at all".
+    #[test_case(serde_json::json!([{ TOOL_NAME_FIELD: READ_TOOL_NAME }]), true,  false ; "published_names_bind_the_filter")]
+    #[test_case(serde_json::json!([]),                                    false, false ; "empty_array_publishes_nothing")]
+    #[test_case(serde_json::json!([{ "description": "nameless" }]),       true,  true  ; "unreadable_array_falls_back_to_config")]
+    #[test_case(serde_json::json!({}),                                    true,  true  ; "non_array_falls_back_to_config")]
+    fn assembled_reads_its_filter_off_the_published_array(
+        definitions: Value,
+        read_matches: bool,
+        write_matches: bool,
+    ) {
+        let model = Model::from_spec(TEST_MODEL_SPEC).unwrap();
+        let tools = RequestTools::assembled(definitions, &AgentConfig::default(), &model);
+        assert_eq!(tools.filter().matches(READ_TOOL_NAME), read_matches);
+        assert_eq!(tools.filter().matches(WRITE_TOOL_NAME), write_matches);
+    }
 
     #[test_case(true  ; "vision_model_keeps_view_image")]
     #[test_case(false ; "text_only_model_loses_view_image")]
     fn from_config_gates_view_image_on_vision(vision: bool) {
-        let mut model = Model::from_spec("anthropic/claude-opus-4-8").unwrap();
+        let mut model = Model::from_spec(TEST_MODEL_SPEC).unwrap();
         model.supports_vision_override = Some(vision);
         let filter = ToolFilter::from_config(&AgentConfig::default(), &model, &[]);
         assert_eq!(filter.matches(VIEW_IMAGE_TOOL_NAME), vision);
