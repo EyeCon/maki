@@ -22,7 +22,7 @@ If you pass a prompt (or pipe stdin) without `--print`, the TUI still opens and 
 |------|-----|-----------|---------------------|
 | `-m` / `--model` | yes | yes | yes |
 | `--yolo` | yes | yes | yes (or `--permission-mode bypassPermissions`) |
-| `--no-plugins` / `--no-commands` / `--no-rtk` / `--no-jit` | yes | yes | yes |
+| `--no-plugins` / `--no-commands` / `--no-jit` | yes | yes | yes |
 | `--allowed-tools` / `--disallowed-tools` | yes | yes | yes |
 | `-c` / `--continue`, `-s` / `--session` | yes | no (always new session) | yes |
 | `--exit-on-done` | yes | n/a (always exits) | n/a |
