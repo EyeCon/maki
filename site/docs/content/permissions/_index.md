@@ -14,7 +14,7 @@ Rules come from four layers, combined for resolution:
 1. **Session rules**, set during the current session (in-memory only)
 2. **Config rules**, loaded from TOML permission files
 3. **Builtin rules**, the hardcoded defaults
-4. **Plugin rules**, declared by plugins via [`maki.api.register_permission_rule`](/lua-api/#maki-api-register_permission_rule)
+4. **Plugin rules**, declared by plugins via [`maki.api.register_permission_rule`](/docs/lua-api/#maki-api-register_permission_rule)
 
 Any matching deny blocks the tool. No exceptions, so a config deny always beats a plugin allow.
 
@@ -197,7 +197,7 @@ Brace groups `{ ... }` and control flow (`if`, `for`, …) are segmented when po
 
 ## Plugin Permissions
 
-Lua plugins have a separate, unrelated gate. A `plugin.toml` manifest next to the Lua file controls which gated `maki.*` APIs it may call. No manifest means every gated call is denied, including for your own `init.lua`. The [Lua API reference](/lua-api/#plugin-permissions) documents the manifest and lists every permission.
+Lua plugins have a separate, unrelated gate. A `plugin.toml` manifest next to the Lua file controls which gated `maki.*` APIs it may call. No manifest means every gated call is denied, including for your own `init.lua`. The [Lua API reference](/docs/lua-api/#plugin-permissions) documents the manifest and lists every permission.
 
 ## Network Addresses
 
