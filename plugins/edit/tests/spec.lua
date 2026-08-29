@@ -90,6 +90,16 @@ case("reindent_widens_inner_levels_when_the_base_column_is_shared", function()
   eq(result, "if x:\n    a()\n    b()\n")
 end)
 
+-- Nothing in the file shows an eight or twelve space column, so the base column
+-- is the only thing left that can recognise the file's own frame, and a drift
+-- that is itself two levels deep must not talk it out of that.
+case("reindent_leaves_a_file_frame_new_string_that_adds_a_level_below_the_deepest_alone", function()
+  local content = "def f():\n    if x:\n        a()\n    return 1\n"
+  local new = "    if x:\n        if y:\n            a()"
+  local result = fr.replace(content, "  if x:\n    a()", new, false)
+  eq(result, "def f():\n    if x:\n        if y:\n            a()\n    return 1\n")
+end)
+
 case("reindent_leaves_a_line_that_exits_the_block_alone", function()
   local content = "def f():\n    a = 1\n    return a\n"
   local new = "  a = 1\n  return a\n\n\ndef g():\n  return 2"

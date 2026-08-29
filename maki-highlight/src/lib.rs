@@ -371,6 +371,8 @@ pub fn highlight_ansi(lang: &str, code: &str, bg: (u8, u8, u8)) -> String {
 }
 
 pub struct CodeHighlighter {
+    start_parse: ParseState,
+    start_highlight: HighlightState,
     checkpoint_parse: ParseState,
     checkpoint_highlight: HighlightState,
     completed_lines: usize,
@@ -382,9 +384,13 @@ impl CodeHighlighter {
         let syntax = syntax_for_token(lang);
         let t = theme();
         let highlighter = SynHighlighter::new(&t);
+        let parse = ParseState::new(syntax);
+        let highlight = HighlightState::new(&highlighter, ScopeStack::new());
         Self {
-            checkpoint_parse: ParseState::new(syntax),
-            checkpoint_highlight: HighlightState::new(&highlighter, ScopeStack::new()),
+            start_parse: parse.clone(),
+            start_highlight: highlight.clone(),
+            checkpoint_parse: parse,
+            checkpoint_highlight: highlight,
             completed_lines: 0,
             cached_segments: Vec::new(),
         }
@@ -412,6 +418,17 @@ impl CodeHighlighter {
         } else {
             total - 1
         };
+
+        // The input can shrink. Closing a fence drops the newline before it,
+        // so a line that was complete turns back into the partial tail, and the
+        // checkpoint already stands past it with no way back to an earlier one.
+        // Replaying from the block's start is the cheap way out, and it happens
+        // once per block.
+        if new_completed < self.completed_lines {
+            self.checkpoint_parse = self.start_parse.clone();
+            self.checkpoint_highlight = self.start_highlight.clone();
+            self.completed_lines = 0;
+        }
 
         if new_completed > self.completed_lines {
             let mut hl = Highlighter::from_state(
@@ -456,6 +473,8 @@ mod tests {
 
     const BUDGETED_ENTRIES: usize = 32;
     const RUST: &str = "rust";
+    const PYTHON: &str = "python";
+    const OPENS_A_STRING: &str = "x = '''";
 
     /// The theme and the block cache are process globals. Nextest gives every
     /// test its own process, `cargo test` does not, so tests that swap the theme
@@ -471,6 +490,28 @@ mod tests {
 
     fn lines_text(lines: &[Vec<StyledSegment>]) -> Vec<String> {
         lines.iter().map(|l| segments_text(l)).collect()
+    }
+
+    /// A closing fence takes the newline before it, so the block's last line
+    /// arrives complete and then turns back into the partial tail. Painting it
+    /// from the checkpoint that already ate it opens the string twice, and the
+    /// line keeps the string's color for the rest of the turn.
+    #[test]
+    fn the_last_line_of_a_block_keeps_its_colors_when_the_fence_closes() {
+        warmup();
+        let mut ch = CodeHighlighter::new(PYTHON);
+        // The newline gives the line a trailing empty segment the fence takes
+        // away again, so only the colors of the text itself are comparable.
+        let colors = |lines: &[Vec<StyledSegment>]| {
+            lines
+                .iter()
+                .flatten()
+                .filter(|s| !s.text.is_empty())
+                .map(|s| (s.text.clone(), s.fg))
+                .collect::<Vec<_>>()
+        };
+        let while_streaming = colors(ch.update(&format!("{OPENS_A_STRING}\n")));
+        assert_eq!(while_streaming, colors(ch.update(OPENS_A_STRING)));
     }
 
     #[test]
