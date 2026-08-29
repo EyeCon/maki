@@ -26,7 +26,7 @@ pub use pack::{
     discover_installed, install_declared, lockfile_path, sanitize_message, site_dir,
 };
 pub use plugin_permissions::{Permission, PluginPermissions, Requested};
-pub use runtime::{KILL_GRACE, RestoreItem, WARM_TOOL_CAP};
+pub use runtime::{KILL_GRACE, MAX_INFLIGHT_TOOLS, RestoreItem, WARM_TOOL_CAP};
 
 pub mod test_support {
     use crate::KeymapReader;

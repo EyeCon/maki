@@ -16,8 +16,8 @@ use maki_config::{
     ToolOutputLines,
 };
 use maki_lua::{
-    PERMISSION_NAME_WARNING, PluginError, PluginHost, SKIPPED_PLUGIN_WARNING, SessionEndReason,
-    WARM_TOOL_CAP,
+    MAX_INFLIGHT_TOOLS, PERMISSION_NAME_WARNING, PluginError, PluginHost, SKIPPED_PLUGIN_WARNING,
+    SessionEndReason, WARM_TOOL_CAP,
 };
 use maki_providers::Model;
 use maki_storage::id::SessionRef;
@@ -5727,6 +5727,57 @@ fn interpreter_tools_gather_resolves_parallel_batch() {
     host.load_source("interp_gather_plugin", &src).unwrap();
     let out = exec_tool(&reg, "interp_gather", serde_json::json!({})).unwrap();
     assert_eq!(out, "A|B");
+}
+
+const NESTED_DEPTH_TOOL: &str = "nested_depth";
+const NESTED_DEPTH_BOTTOM: &str = "bottom";
+const NESTED_DEPTH_WEDGED: &str =
+    "nested call chain never replied: the in-flight gate charged a slot per level";
+const NESTED_DEPTH_PLUGIN: &str = r#"
+maki.api.register_tool({
+    name = "nested_depth",
+    description = "dispatches itself one level deeper",
+    schema = {
+        type = "object",
+        properties = { depth = { type = "integer" } },
+        required = { "depth" },
+    },
+    audiences = { "main" },
+    handler = function(input, ctx)
+        if input.depth == 0 then return "bottom" end
+        local out, err = maki.agent.call_tool(ctx, "nested_depth", { depth = input.depth - 1 })
+        if err then return { llm_output = err, is_error = true } end
+        return out
+    end,
+})
+"#;
+
+/// Every level stays parked on its child, so a slot per level wedges the gate
+/// for good once the chain is longer than the cap. A nested call rides its
+/// caller's slot instead, which leaves the depth up to the callers.
+#[test]
+fn nested_calls_run_deeper_than_the_inflight_cap() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    host.load_source("nested_depth_plugin", NESTED_DEPTH_PLUGIN)
+        .unwrap();
+
+    let (done_tx, done_rx) = flume::bounded(1);
+    let worker_reg = Arc::clone(&reg);
+    std::thread::spawn(move || {
+        let out = exec_tool_in(
+            &worker_reg,
+            NESTED_DEPTH_TOOL,
+            json!({ "depth": MAX_INFLIGHT_TOOLS + 1 }),
+            Some(Arc::clone(&worker_reg)),
+        );
+        let _ = done_tx.send(out);
+    });
+
+    let out = poll_until(NESTED_DEPTH_WEDGED, || done_rx.try_recv().ok());
+
+    assert_eq!(out, Ok(NESTED_DEPTH_BOTTOM.to_owned()));
+    drop(host);
 }
 
 #[test]

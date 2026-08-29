@@ -390,6 +390,7 @@ impl ToolInvocation for LuaToolInvocation {
             },
             ctx: Box::new(LuaCtx::start(ctx)),
             reply: reply_tx,
+            nested: crate::runtime::under_inflight_slot(),
         };
         let tx = self.tx.clone();
         Box::pin(async move {
@@ -438,6 +439,10 @@ impl ToolInvocation for LuaToolInvocation {
     }
 
     fn execute<'a>(self: Box<Self>, ctx: &'a ToolContext) -> ExecFuture<'a> {
+        // Read here on the caller's stack, not inside the future: a call a Lua
+        // tool dispatched is built while its parent is being polled, and that
+        // is the only moment we can tell it runs under the parent's slot.
+        let nested = crate::runtime::under_inflight_slot();
         let deadline = ctx.deadline;
         let plugin = self.plugin;
         let tool = self.tool;
@@ -479,6 +484,7 @@ impl ToolInvocation for LuaToolInvocation {
                     },
                     reply: reply_tx,
                     live,
+                    nested,
                 })
                 .await
                 .is_err()

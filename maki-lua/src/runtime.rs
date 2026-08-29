@@ -59,7 +59,7 @@ const NIL_WITHOUT_FINISH_MSG: &str =
     "handler returned nil without calling ctx:finish() or starting jobs";
 pub(crate) const CANCELLED_MSG: &str = "cancelled";
 const HANDLER_TIMEOUT_MSG: &str = "timeout";
-const MAX_INFLIGHT_TOOLS: usize = 64;
+pub const MAX_INFLIGHT_TOOLS: usize = 64;
 /// Finished tools kept clickable without a restore round-trip. Purely a
 /// cache: a click that misses it falls back to the restore item carried
 /// by the request, so eviction only costs latency, never correctness.
@@ -238,6 +238,9 @@ pub enum Request {
         deadline: Option<Instant>,
         reply: flume::Sender<ToolCallReply>,
         live: Option<LiveCtx>,
+        /// Runs on the caller's slot instead of taking one of its own.
+        /// See [`under_inflight_slot`].
+        nested: bool,
     },
     ComputeHeader {
         plugin: Arc<str>,
@@ -327,6 +330,8 @@ pub enum Request {
         live: LiveCtx,
         ctx: Box<LuaCtx>,
         reply: flume::Sender<()>,
+        /// See [`Request::CallTool::nested`].
+        nested: bool,
     },
 }
 
@@ -1412,6 +1417,77 @@ impl InflightGate {
         self.wait_below(MAX_INFLIGHT_TOOLS).await;
         GateGuard::new(self)
     }
+
+    /// [`Self::acquire`] for a call the host cannot interrupt yet. A call
+    /// still queued here has no [`TaskCell`], so the watchdog and
+    /// [`until_abandoned`] have nothing to end. The wait ends itself once
+    /// nobody is left waiting for the reply, and reports what the handler
+    /// would have reported.
+    async fn acquire_before_abandoned(
+        self: &Rc<Self>,
+        cancel: &CancelToken,
+        deadline: Option<Instant>,
+    ) -> Result<GateGuard, &'static str> {
+        let lapsed = async {
+            match deadline {
+                Some(at) => _ = smol::Timer::at(at).await,
+                None => std::future::pending::<()>().await,
+            }
+            HANDLER_TIMEOUT_MSG
+        };
+        let cancelled = async {
+            cancel.cancelled().await;
+            CANCELLED_MSG
+        };
+        futures_lite::future::or(async { Ok(self.acquire().await) }, async {
+            Err(futures_lite::future::or(cancelled, lapsed).await)
+        })
+        .await
+    }
+}
+
+thread_local! {
+    static SLOT_COVERED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the caller already runs under an in-flight slot.
+///
+/// A tool call made from there cannot finish before its caller does, and the
+/// caller holds its slot all that time. Charge the child a slot of its own and
+/// the gate deadlocks against itself: park as many callers as there are slots
+/// and no child is ever admitted, so no caller ever returns. The child rides
+/// the caller's slot instead, which also keeps the drain barrier honest, since
+/// that slot outlives the whole subtree.
+pub(crate) fn under_inflight_slot() -> bool {
+    SLOT_COVERED.get()
+}
+
+pin_project_lite::pin_project! {
+    /// `slot` is `None` when an ancestor holds the slot for this work. The
+    /// flag goes up on every poll and back down after, because other tasks on
+    /// the same executor run in between and must not inherit the cover.
+    struct SlotCovered<F> {
+        _slot: Option<GateGuard>,
+        #[pin]
+        inner: F,
+    }
+}
+
+impl<F: Future> Future for SlotCovered<F> {
+    type Output = F::Output;
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let prev = SLOT_COVERED.replace(true);
+        let result = self.project().inner.poll(cx);
+        SLOT_COVERED.set(prev);
+        result
+    }
+}
+
+fn covered<F: Future>(slot: Option<GateGuard>, inner: F) -> SlotCovered<F> {
+    SlotCovered { _slot: slot, inner }
 }
 
 struct GateGuard(Rc<InflightGate>);
@@ -1588,15 +1664,17 @@ fn spawn_async_task(
     let g = Rc::clone(gate);
 
     ex.spawn(async move {
-        let _gate_guard = g.acquire().await;
+        let slot = Some(g.acquire().await);
 
         let mut cell = TaskCell::new(task.cancel.clone(), task.deadline, task.live_ctx.clone());
         cell.command_depth = task.command_depth;
         let scope = TaskScope::new(&lua, cell);
         let handle = Arc::clone(scope.handle());
-        let result = scope
-            .scope_future(run_work_fn(&lua, &task.work_fn, &handle))
-            .await;
+        let result = covered(
+            slot,
+            scope.scope_future(run_work_fn(&lua, &task.work_fn, &handle)),
+        )
+        .await;
         if let Err(e) = &result {
             let tool_id = task.live_ctx.as_ref().map(|l| l.tool_use_id.as_str());
             tracing::debug!(error = %e, tool_id, "async.run: task failed");
@@ -2523,15 +2601,18 @@ fn spawn_restore(
         let _tracker = tracker;
         // Acquired before the timeout race starts, so the per-item deadline
         // measures the item's own run, not time queued behind the whole batch.
-        let _gate_guard = g.acquire().await;
+        let slot = Some(g.acquire().await);
         let id = item.tool_use_id.clone();
         let theme_gen = item.theme_gen;
         let tool = Arc::clone(&item.tool);
-        let res = futures_lite::future::race(restore_item(&lua, &plugins, item), async {
-            smol::Timer::after(RESTORE_ITEM_TIMEOUT).await;
-            tracing::warn!(tool = &*tool, "restore item timed out");
-            None
-        })
+        let res = covered(
+            slot,
+            futures_lite::future::race(restore_item(&lua, &plugins, item), async {
+                smol::Timer::after(RESTORE_ITEM_TIMEOUT).await;
+                tracing::warn!(tool = &*tool, "restore item timed out");
+                None
+            }),
+        )
         .await;
         if let Some(reply) = res {
             reply.emit(&id, theme_gen, &event_tx);
@@ -3052,6 +3133,7 @@ pub fn spawn(
                             deadline,
                             reply,
                             live,
+                            nested,
                         } => {
                             let lua = rt.lua.clone();
                             let plugins = Rc::clone(&rt.plugins);
@@ -3059,20 +3141,34 @@ pub fn spawn(
                             let warm_tools = Rc::clone(&rt.warm_tools);
                             let shutdown_ref = Arc::clone(&rt.shutdown);
                             let g = Rc::clone(&gate);
+                            let cancel = ctx.cancel.clone();
                             ex.spawn(async move {
-                                let _gate_guard = g.acquire().await;
-                                let res = run_tool_call(
-                                    lua.clone(),
-                                    plugin,
-                                    tool,
-                                    input,
-                                    ctx,
-                                    deadline,
-                                    live,
-                                    live_tasks,
-                                    warm_tools,
-                                    plugins,
-                                    shutdown_ref,
+                                let slot = if nested {
+                                    None
+                                } else {
+                                    match g.acquire_before_abandoned(&cancel, deadline).await {
+                                        Ok(guard) => Some(guard),
+                                        Err(msg) => {
+                                            let _ = reply.send(ToolCallReply::err(msg));
+                                            return;
+                                        }
+                                    }
+                                };
+                                let res = covered(
+                                    slot,
+                                    run_tool_call(
+                                        lua.clone(),
+                                        plugin,
+                                        tool,
+                                        input,
+                                        ctx,
+                                        deadline,
+                                        live,
+                                        live_tasks,
+                                        warm_tools,
+                                        plugins,
+                                        shutdown_ref,
+                                    ),
                                 )
                                 .await;
                                 let _ = reply.send(res);
@@ -3271,9 +3367,11 @@ pub fn spawn(
                                 Err(_) => LuaValue::Nil,
                             };
                             ex.spawn(async move {
-                                let _gate_guard = g.acquire().await;
-                                let call =
-                                    ScopedFuture::new(lua.clone(), handle, func.call_async::<()>(arg));
+                                let slot = Some(g.acquire().await);
+                                let call = covered(
+                                    slot,
+                                    ScopedFuture::new(lua.clone(), handle, func.call_async::<()>(arg)),
+                                );
                                 if let Err(e) = call.await {
                                     tracing::warn!(tool_use_id, error = %e, "live click failed");
                                 }
@@ -3302,6 +3400,7 @@ pub fn spawn(
                             live,
                             ctx,
                             reply,
+                            nested,
                         } => {
                             let func = {
                                 let plugins = rt.plugins.borrow();
@@ -3318,8 +3417,12 @@ pub fn spawn(
                             let lua = rt.lua.clone();
                             let g = Rc::clone(&gate);
                             ex.spawn(async move {
-                                let _gate_guard = g.acquire().await;
-                                run_tool_start(&lua, func, &tool, input, live, ctx).await;
+                                let slot = match nested {
+                                    true => None,
+                                    false => Some(g.acquire().await),
+                                };
+                                covered(slot, run_tool_start(&lua, func, &tool, input, live, ctx))
+                                    .await;
                                 let _ = reply.send(());
                             })
                             .detach();
@@ -3594,6 +3697,52 @@ mod tests {
                 t.await;
             }
             assert_eq!(g.count.get(), 0);
+        }));
+    }
+
+    /// The cover belongs to the polls of the covered work, not to the thread.
+    /// A sibling that runs while that work is parked is a call of its own and
+    /// still owes a slot.
+    #[test]
+    fn slot_cover_does_not_leak_into_a_sibling_task() {
+        let ex = smol::LocalExecutor::new();
+        smol::block_on(ex.run(async {
+            let (release_tx, release_rx) = flume::unbounded::<()>();
+            let holder = ex.spawn(covered(None, async move {
+                let entered = under_inflight_slot();
+                release_rx.recv_async().await.ok();
+                (entered, under_inflight_slot())
+            }));
+            smol::future::yield_now().await;
+            assert!(!ex.spawn(async { under_inflight_slot() }).await);
+            drop(release_tx);
+            assert_eq!(holder.await, (true, true));
+            assert!(!under_inflight_slot());
+        }));
+    }
+
+    #[test_case(true, false, HANDLER_TIMEOUT_MSG ; "lapsed_deadline")]
+    #[test_case(false, true, CANCELLED_MSG ; "cancelled")]
+    #[test_case(true, true, CANCELLED_MSG ; "cancel_outranks_deadline")]
+    fn admission_gives_up_once_nobody_waits_for_the_reply(
+        lapsed: bool,
+        cancelled: bool,
+        expected: &str,
+    ) {
+        let ex = smol::LocalExecutor::new();
+        smol::block_on(ex.run(async {
+            let g = Rc::new(gate());
+            for _ in 0..MAX_INFLIGHT_TOOLS {
+                g.increment();
+            }
+            let (trigger, token) = CancelToken::new();
+            if cancelled {
+                trigger.cancel();
+            }
+            let deadline = lapsed.then(|| Instant::now() - Duration::from_secs(1));
+            let admitted = g.acquire_before_abandoned(&token, deadline).await;
+            assert_eq!(admitted.err(), Some(expected));
+            assert_eq!(g.count.get(), MAX_INFLIGHT_TOOLS);
         }));
     }
 
