@@ -43,7 +43,9 @@ use crate::api::tool::{
 use crate::api::ui::HintStore;
 use crate::api::ui::buf::{BufHandle, BufferStore};
 use crate::api::util::command::{CommandHandlerMap, HintWriter, publish_command_snapshot};
-use crate::api::util::command::{LuaCommandReader, LuaCommandWriter, UiAction};
+use crate::api::util::command::{
+    LuaCommandReader, LuaCommandWriter, UiAction, UiAttachment, install_ui_attachment,
+};
 use crate::api::util::convert::json_to_lua;
 use crate::api::util::ctx::LuaCtx;
 use crate::api::util::setup::ConfigStore;
@@ -2966,6 +2968,7 @@ pub(crate) struct LuaThread {
     pub keymap_reader: KeymapReader,
     pub hint_reader: crate::api::util::command::HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
+    pub ui_attachment: UiAttachment,
 }
 
 /// Lua lives on its own OS thread (no Send needed). `smol::block_on`
@@ -2983,6 +2986,8 @@ pub fn spawn(
     let shutdown_thread = Arc::clone(&shutdown);
     let (init_tx, init_rx) = flume::bounded::<Result<(), PluginError>>(1);
     let (ui_action_tx, ui_action_rx) = flume::unbounded::<UiAction>();
+    let ui_attachment = UiAttachment::default();
+    let ui_attachment_thread = ui_attachment.clone();
     let (command_writer, command_reader) = LuaCommandWriter::new();
     let (keymap_writer, keymap_reader) = KeymapWriter::new();
     let (hint_writer, hint_reader) = HintWriter::new();
@@ -2990,6 +2995,7 @@ pub fn spawn(
     let handle = thread::Builder::new()
         .name("maki-lua".to_owned())
         .spawn(move || {
+            install_ui_attachment(ui_attachment_thread);
             let mut rt = match LuaRuntime::new(
                 registry,
                 tx_clone,
@@ -3470,6 +3476,7 @@ pub fn spawn(
         keymap_reader,
         hint_reader,
         ui_action_rx,
+        ui_attachment,
     })
 }
 

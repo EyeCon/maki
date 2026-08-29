@@ -683,16 +683,17 @@ quiet, and so does startup.
 `"SessionEnd"` is the teardown signal: it fires first so handlers can
 still inspect or stop the session's jobs, then session-owned jobs are
 reaped. `data.reason` names the path it came from: `"reset"` (TUI
-`/new`), `"load"`, `"delete"` (tab closed), `"shutdown"`, `"replaced"`
-(an ACP client took the session's place), or `"completed"` (a headless
-run finished).
+`/new`), `"load"`, `"delete"` (tab closed), `"shutdown"`, `"reload"`
+(`/reload` is rebuilding the plugin host, and the session carries on in
+the new one), `"replaced"` (an ACP client took the session's place), or
+`"completed"` (a headless run finished).
 
-On `"shutdown"`, `"replaced"`, and `"completed"` the host is already
-tearing down, so the UI is gone (`maki.fn` roundtrips fail right away)
-and every handler shares one grace period. `data.deadline_ms` is how
-much of it is left at dispatch, so write state out with `maki.fs` and do
-not park. On the other reasons nothing waits and `data.deadline_ms` is
-nil.
+On `"shutdown"`, `"reload"`, `"replaced"`, and `"completed"` the host is
+already tearing down, so the UI is detached (`maki.fn` roundtrips fail
+right away) and every handler shares one grace period. `data.deadline_ms`
+is how much of it is left at dispatch, so write state out with `maki.fs`
+and do not park. On the other reasons nothing waits and `data.deadline_ms`
+is nil.
 
 `"SessionReset"` stays TUI-only (`/new`) and fires on the same path as
 `"SessionEnd"` with `reason = "reset"`.
