@@ -1,10 +1,10 @@
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use futures_lite::io::AsyncReadExt;
-use isahc::config::{Configurable, RedirectPolicy, VersionNegotiation};
+use isahc::config::{Configurable, RedirectPolicy, ResolveMap, VersionNegotiation};
 use isahc::{AsyncBody, HttpClient, Request, Response};
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, Result as LuaResult, Table};
@@ -28,6 +28,16 @@ const HTTPS_SCHEME: &str = "https://";
 const HTTP_PORT: u16 = 80;
 const HTTPS_PORT: u16 = 443;
 const ALLOWLIST_HINT: &str = "add it to `net.allowed_private_hosts` in your init.lua to allow it";
+/// Reserved IPv4 ranges the standard library has no predicate for. Carrier
+/// grade NAT is the one that bites: Alibaba Cloud parks its instance metadata
+/// service on it at 100.100.100.200. Then protocol assignments, benchmarking,
+/// and everything from 240.0.0.0 up, which takes in the broadcast address.
+const RESERVED_V4_NETS: [(Ipv4Addr, u8); 4] = [
+    (Ipv4Addr::new(100, 64, 0, 0), 10),
+    (Ipv4Addr::new(192, 0, 0, 0), 24),
+    (Ipv4Addr::new(198, 18, 0, 0), 15),
+    (Ipv4Addr::new(240, 0, 0, 0), 4),
+];
 /// Credentials handed to one authority are not for whoever it redirects us to.
 /// The same set isahc scrubbed before redirects were followed by hand.
 const CROSS_AUTHORITY_HEADERS: [&str; 5] = [
@@ -159,6 +169,18 @@ fn split_host_port(authority: &str) -> (&str, Option<u16>) {
     }
 }
 
+/// The address the SSRF guard actually vetted for the host in the URL.
+///
+/// Without it the name is looked up twice, once by the guard and once by curl
+/// at connect time, and a record with a zero TTL can answer public to the
+/// first and 169.254.169.254 to the second.
+#[derive(Debug)]
+struct DnsPin {
+    host: String,
+    port: u16,
+    addr: IpAddr,
+}
+
 struct RequestParams {
     url: String,
     method: String,
@@ -167,6 +189,8 @@ struct RequestParams {
     timeout: Duration,
     max_bytes: usize,
     retries: u32,
+    /// `None` when the guard reached its verdict without DNS.
+    pin: Option<DnsPin>,
 }
 
 struct ResponseData {
@@ -231,7 +255,7 @@ lua_table! {
 fn extract_request_params(url: &str, opts: Option<&Table>) -> Result<RequestParams, String> {
     let allowed = ALLOWED_PRIVATE_HOSTS.load_full();
     let url = validate_and_upgrade_url(url, &allowed)?;
-    check_ssrf(&url, &allowed)?;
+    let pin = check_ssrf(&url, &allowed)?;
 
     let method = opts
         .and_then(|o| o.get::<String>("method").ok())
@@ -275,6 +299,7 @@ fn extract_request_params(url: &str, opts: Option<&Table>) -> Result<RequestPara
         timeout,
         max_bytes,
         retries,
+        pin,
     })
 }
 
@@ -372,29 +397,40 @@ fn redirect_location(response: &Response<AsyncBody>) -> Option<String> {
     Some(encoded)
 }
 
-async fn do_request(mut params: RequestParams) -> Result<ResponseData, String> {
-    let client = HttpClient::builder()
+/// One client per hop, because a DNS override is a property of the curl handle
+/// isahc builds the client around and cannot be attached to a single request.
+/// The pin changes with every redirect, so the client has to as well.
+fn build_client(params: &RequestParams) -> Result<HttpClient, String> {
+    let mut builder = HttpClient::builder()
         .timeout(params.timeout)
-        // Redirects are followed by hand below, so every hop goes through the
-        // SSRF check. Left to curl, a URL that passed the check could still
-        // bounce us into 169.254.169.254.
+        // Redirects are followed by hand, so every hop goes through the SSRF
+        // check. Left to curl, a URL that passed the check could still bounce
+        // us into 169.254.169.254.
         .redirect_policy(RedirectPolicy::None)
         // The workspace enables curl's http2 feature for OTLP over gRPC. This
         // client fetches arbitrary user URLs, so keep it on HTTP/1.1 rather
         // than change how every one of them is negotiated.
-        .version_negotiation(VersionNegotiation::http11())
-        .build()
-        .map_err(|e| format!("client error: {e}"))?;
+        .version_negotiation(VersionNegotiation::http11());
 
+    // Connect to the address the guard vetted instead of asking DNS again and
+    // trusting whatever the second answer says.
+    if let Some(pin) = &params.pin {
+        builder = builder.dns_resolve(ResolveMap::new().add(&pin.host, pin.port, pin.addr));
+    }
+
+    builder.build().map_err(|e| format!("client error: {e}"))
+}
+
+async fn do_request(mut params: RequestParams) -> Result<ResponseData, String> {
     let allowed = ALLOWED_PRIVATE_HOSTS.load_full();
-    let mut response = send_with_retries(&client, &params).await?;
+    let mut response = send_with_retries(&build_client(&params)?, &params).await?;
 
     for _ in 0..MAX_REDIRECTS {
         let Some(location) = redirect_location(&response) else {
             break;
         };
         params.follow_redirect(response.status().as_u16(), &location, &allowed)?;
-        response = send_with_retries(&client, &params).await?;
+        response = send_with_retries(&build_client(&params)?, &params).await?;
     }
     if redirect_location(&response).is_some() {
         return Err(format!("gave up after {MAX_REDIRECTS} redirects"));
@@ -453,7 +489,7 @@ impl RequestParams {
             .join(location)
             .map_err(|e| format!("invalid redirect to {location}: {e}"))?;
         let target = validate_and_upgrade_url(target.as_str(), allowed)?;
-        check_ssrf(&target, allowed)?;
+        let pin = check_ssrf(&target, allowed)?;
 
         let landed =
             Url::parse(&target).map_err(|e| format!("invalid redirect to {location}: {e}"))?;
@@ -474,6 +510,7 @@ impl RequestParams {
             self.body.clear();
         }
         self.url = target;
+        self.pin = pin;
         Ok(())
     }
 }
@@ -500,10 +537,15 @@ fn extract_host_port(url: &str) -> Option<(&str, u16)> {
     Some((host, port.unwrap_or(default_port)))
 }
 
-fn check_ssrf(url: &str, allowed: &HostAllowlist) -> Result<(), String> {
+/// Runs the guard and, when it had to resolve a name to reach its verdict,
+/// hands back the address the request must then be pinned to.
+fn check_ssrf(url: &str, allowed: &HostAllowlist) -> Result<Option<DnsPin>, String> {
     let (host, port) = extract_host_port(url).ok_or("cannot extract host from URL")?;
+    // A name on the allowlist is trusted whatever it resolves to, and a URL
+    // carrying a literal address leaves curl nothing to resolve. Neither
+    // reached a verdict through DNS, so neither has anything to pin.
     if allowed.allows_host(host, port) {
-        return Ok(());
+        return Ok(None);
     }
 
     if let Ok(ip) = host.parse::<IpAddr>() {
@@ -512,7 +554,7 @@ fn check_ssrf(url: &str, allowed: &HostAllowlist) -> Result<(), String> {
                 "blocked: {ip} is a private/metadata address ({ALLOWLIST_HINT})"
             ));
         }
-        return Ok(());
+        return Ok(None);
     }
 
     // A host we cannot resolve is a host we cannot vouch for, and that covers
@@ -520,6 +562,7 @@ fn check_ssrf(url: &str, allowed: &HostAllowlist) -> Result<(), String> {
     let addrs = (host, port)
         .to_socket_addrs()
         .map_err(|e| format!("blocked: cannot resolve {host}: {e} ({ALLOWLIST_HINT})"))?;
+    let mut vetted = None;
     for sa in addrs {
         if is_private_ip(&sa.ip()) && !allowed.allows_ip(sa.ip(), port) {
             return Err(format!(
@@ -527,14 +570,29 @@ fn check_ssrf(url: &str, allowed: &HostAllowlist) -> Result<(), String> {
                 sa.ip()
             ));
         }
+        // curl's resolve list holds one address per host and port, so the first
+        // the resolver offered wins. That is the one curl would have tried
+        // first anyway, the order arriving already sorted.
+        vetted.get_or_insert(sa.ip());
     }
-    Ok(())
+
+    let addr = vetted
+        .ok_or_else(|| format!("blocked: {host} resolves to no addresses ({ALLOWLIST_HINT})"))?;
+    Ok(Some(DnsPin {
+        host: host.to_string(),
+        port,
+        addr,
+    }))
 }
 
 fn is_private_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || is_reserved_v4(*v4)
         }
         IpAddr::V6(v6) => {
             if v6.is_loopback() || v6.is_unspecified() {
@@ -547,7 +605,9 @@ fn is_private_ip(ip: &IpAddr) -> bool {
                 return is_private_ip(&IpAddr::V4(v4));
             }
             let bytes = v6.octets();
-            if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80 {
+            // fe80::/10 link-local and fec0::/10 site-local. Site-local was
+            // deprecated rather than withdrawn, and stacks still route it.
+            if bytes[0] == 0xfe && matches!(bytes[1] & 0xc0, 0x80 | 0xc0) {
                 return true;
             }
             if bytes[0] & 0xfe == 0xfc {
@@ -556,6 +616,12 @@ fn is_private_ip(ip: &IpAddr) -> bool {
             false
         }
     }
+}
+
+fn is_reserved_v4(v4: Ipv4Addr) -> bool {
+    RESERVED_V4_NETS
+        .iter()
+        .any(|(net, prefix)| ip_in_net(v4.into(), (*net).into(), *prefix))
 }
 
 /// An allowlisted host keeps plain `http://`, because the local services
@@ -585,7 +651,7 @@ fn validate_and_upgrade_url(url: &str, allowed: &HostAllowlist) -> Result<String
 mod tests {
     use super::*;
     use crate::plugin_permissions::PluginPermissions;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::Ipv6Addr;
     use test_case::test_case;
 
     const SEARX_HOST: &str = "searx.lan";
@@ -599,6 +665,10 @@ mod tests {
     const IN_CIDR_URL: &str = "https://10.1.2.3";
     const OUT_OF_CIDR_URL: &str = "https://192.168.1.1";
     const METADATA_URL: &str = "http://169.254.169.254/latest/meta-data";
+    const ALIYUN_METADATA_URL: &str = "http://100.100.100.200/latest/meta-data";
+    const LOOPBACK_CIDR_ENTRY: &str = "127.0.0.0/8";
+    const IPV6_LOOPBACK_ENTRY: &str = "::1/128";
+    const ALLOWED_PORT: u16 = 8888;
     /// An address rather than a name, so no test needs a DNS answer.
     const PUBLIC_URL: &str = "https://8.8.8.8/";
     const PUBLIC_HTTP_URL: &str = "http://8.8.8.8/";
@@ -637,6 +707,7 @@ mod tests {
     #[test_case(&[], "https://10.0.0.1", false ; "rfc1918_10_blocked")]
     #[test_case(&[], "https://172.16.0.1", false ; "rfc1918_172_blocked")]
     #[test_case(&[], "https://169.254.169.254", false ; "aws_metadata_blocked")]
+    #[test_case(&[], ALIYUN_METADATA_URL, false ; "aliyun_metadata_blocked")]
     #[test_case(&[], "https://[::1]", false ; "ipv6_loopback_blocked")]
     #[test_case(&[], "https://[::ffff:127.0.0.1]", false ; "ipv4_mapped_loopback_blocked")]
     #[test_case(&[], "https://0.0.0.0", false ; "unspecified_blocked")]
@@ -687,7 +758,45 @@ mod tests {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             max_bytes: DEFAULT_MAX_BYTES,
             retries: 0,
+            pin: None,
         }
+    }
+
+    /// The whole point of the pin: curl is handed the address the guard read,
+    /// so a second lookup cannot answer with a different one.
+    #[test]
+    fn a_resolved_host_is_pinned_to_the_address_the_guard_vetted() {
+        let allowed = allowlist(&[LOOPBACK_CIDR_ENTRY, IPV6_LOOPBACK_ENTRY]);
+        let pin = check_ssrf(LOCALHOST_URL, &allowed)
+            .unwrap()
+            .expect("a resolved host must be pinned");
+        assert_eq!(pin.host, LOCALHOST_ENTRY);
+        assert_eq!(pin.port, ALLOWED_PORT);
+        assert!(is_private_ip(&pin.addr), "{pin:?}");
+    }
+
+    #[test_case(PUBLIC_URL ; "literal_address_needs_no_lookup")]
+    #[test_case(LOCALHOST_URL ; "allowlisted_name_is_trusted_however_it_resolves")]
+    fn hosts_the_guard_never_resolved_are_not_pinned(url: &str) {
+        let pin = check_ssrf(url, &allowlist(&[LOCALHOST_ENTRY])).unwrap();
+        assert!(pin.is_none(), "{pin:?}");
+    }
+
+    /// A hop is only followed once it has been vetted, so the pin has to move
+    /// with the URL: the address vetted for the previous host must not decide
+    /// where the next one connects.
+    #[test]
+    fn a_followed_redirect_replaces_the_pin() {
+        let mut params = redirect_params(LOOPBACK_PORT_URL);
+        params.pin = Some(DnsPin {
+            host: LOCALHOST_ENTRY.to_string(),
+            port: ALLOWED_PORT,
+            addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        });
+        params
+            .follow_redirect(302, LOOPBACK_PORT_URL, &allowlist(&[LOOPBACK_PORT_ENTRY]))
+            .unwrap();
+        assert!(params.pin.is_none(), "{:?}", params.pin);
     }
 
     #[test]
@@ -757,9 +866,38 @@ mod tests {
     #[test_case(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), true ; "v6_link_local")]
     #[test_case(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)), true ; "v6_unique_local_fc")]
     #[test_case(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)), true ; "v6_unique_local_fd")]
+    #[test_case(IpAddr::V6(Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 1)), true ; "v6_site_local")]
     #[test_case(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), false ; "v6_global_unicast")]
     fn is_private_ip_cases(ip: IpAddr, expected: bool) {
         assert_eq!(is_private_ip(&ip), expected);
+    }
+
+    /// Ranges the standard library has no predicate for. Each is checked in
+    /// both spellings, because `::ffff:100.100.100.200` reaches the same host
+    /// as `100.100.100.200`.
+    #[test_case(Ipv4Addr::new(100, 100, 100, 200) ; "aliyun_metadata_in_cgnat")]
+    #[test_case(Ipv4Addr::new(100, 64, 0, 0) ; "cgnat_first")]
+    #[test_case(Ipv4Addr::new(100, 127, 255, 255) ; "cgnat_last")]
+    #[test_case(Ipv4Addr::new(192, 0, 0, 1) ; "ietf_protocol_assignments")]
+    #[test_case(Ipv4Addr::new(198, 18, 0, 1) ; "benchmarking_first")]
+    #[test_case(Ipv4Addr::new(198, 19, 255, 255) ; "benchmarking_last")]
+    #[test_case(Ipv4Addr::new(240, 0, 0, 1) ; "reserved_class_e")]
+    #[test_case(Ipv4Addr::BROADCAST ; "broadcast")]
+    fn reserved_v4_is_private_in_both_spellings(v4: Ipv4Addr) {
+        assert!(is_private_ip(&IpAddr::V4(v4)));
+        assert!(is_private_ip(&IpAddr::V6(v4.to_ipv6_mapped())));
+    }
+
+    /// The address just past each range, so a prefix that is one bit too wide
+    /// does not pass unnoticed.
+    #[test_case(Ipv4Addr::new(100, 63, 255, 255) ; "below_cgnat")]
+    #[test_case(Ipv4Addr::new(100, 128, 0, 0) ; "above_cgnat")]
+    #[test_case(Ipv4Addr::new(192, 0, 1, 1) ; "above_ietf_protocol_assignments")]
+    #[test_case(Ipv4Addr::new(198, 20, 0, 0) ; "above_benchmarking")]
+    #[test_case(Ipv4Addr::new(198, 17, 255, 255) ; "below_benchmarking")]
+    fn addresses_beside_the_reserved_ranges_stay_public(v4: Ipv4Addr) {
+        assert!(!is_private_ip(&IpAddr::V4(v4)));
+        assert!(!is_private_ip(&IpAddr::V6(v4.to_ipv6_mapped())));
     }
 
     #[test_case("https://example.com", Some(("example.com", HTTPS_PORT)) ; "simple_domain")]
