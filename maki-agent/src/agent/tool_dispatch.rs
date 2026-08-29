@@ -845,12 +845,12 @@ mod tests {
         Arc::new(registry)
     }
 
-    fn denying_ctx(tool: ToolKey) -> ToolContext {
+    fn ruled_ctx(mode: &AgentMode, tool: ToolKey, effect: Effect) -> ToolContext {
         let config = PermissionsConfig {
             rules: vec![PermissionRule {
                 tool,
                 scope: None,
-                effect: Effect::Deny,
+                effect,
             }],
             ..Default::default()
         };
@@ -859,7 +859,11 @@ mod tests {
             PathBuf::from(TEST_ROOT),
             Arc::default(),
         ));
-        stub_ctx_with_permissions(&AgentMode::Build, permissions)
+        stub_ctx_with_permissions(mode, permissions)
+    }
+
+    fn denying_ctx(tool: ToolKey) -> ToolContext {
+        ruled_ctx(&AgentMode::Build, tool, Effect::Deny)
     }
 
     #[test]
@@ -1180,11 +1184,20 @@ mod tests {
         });
     }
 
+    /// Plan mode puts MCP behind the user, it does not block it outright. An
+    /// allow rule is the user's answer already, so the call goes through.
     #[test]
-    fn mcp_tool_allowed_in_plan_mode() {
+    fn mcp_tool_allowed_by_rule_in_plan_mode() {
         smol::block_on(async {
             let plan = AgentMode::Plan(PathBuf::from(PLAN_PATH));
-            let ctx = with_mcp(stub_ctx(&plan), &stub_mcp(&[PROBE_QUALIFIED]));
+            let ctx = with_mcp(
+                ruled_ctx(
+                    &plan,
+                    ToolKey::parse(PROBE_QUALIFIED).unwrap(),
+                    Effect::Allow,
+                ),
+                &stub_mcp(&[PROBE_QUALIFIED]),
+            );
             let done = dispatch(&ctx, PROBE_WIRE, &serde_json::json!({})).await;
             // The stub transport fails every call, so a successful run surfaces
             // its error: the proof the call was neither plan-blocked nor
@@ -1205,25 +1218,37 @@ mod tests {
         });
     }
 
+    /// An MCP server can write without announcing it, so a plan-mode session
+    /// asks first even where everything else is approved automatically. The
+    /// stub has no channel to ask on, hence the denial below.
+    #[test]
+    fn mcp_tool_in_plan_mode_is_never_auto_approved() {
+        smol::block_on(async {
+            let plan = AgentMode::Plan(PathBuf::from(PLAN_PATH));
+            let ctx = with_mcp(stub_ctx(&plan), &stub_mcp(&[PROBE_QUALIFIED]));
+            let done = dispatch(&ctx, PROBE_WIRE, &serde_json::json!({})).await;
+            assert!(done.is_error);
+            let text = done.output.as_text();
+            assert!(text.starts_with(PERMISSION_DENIED_PREFIX), "got: {text}");
+            let mut tools = serde_json::json!([]);
+            ctx.mcp.as_ref().unwrap().extend_tools(&mut tools);
+            assert!(
+                !tool_names(&tools).contains(&&PROBE_WIRE.to_owned()[..]),
+                "an unapproved call must not load the definition"
+            );
+        });
+    }
+
     #[test]
     fn mcp_tool_denied_by_rule_in_plan_mode() {
         smol::block_on(async {
-            let config = PermissionsConfig {
-                rules: vec![PermissionRule {
-                    tool: ToolKey::parse(PROBE_QUALIFIED).unwrap(),
-                    scope: None,
-                    effect: Effect::Deny,
-                }],
-                ..Default::default()
-            };
-            let permissions = Arc::new(PermissionManager::new(
-                config,
-                PathBuf::from(TEST_ROOT),
-                Arc::default(),
-            ));
             let plan = AgentMode::Plan(PathBuf::from(PLAN_PATH));
             let ctx = with_mcp(
-                stub_ctx_with_permissions(&plan, permissions),
+                ruled_ctx(
+                    &plan,
+                    ToolKey::parse(PROBE_QUALIFIED).unwrap(),
+                    Effect::Deny,
+                ),
                 &stub_mcp(&[PROBE_QUALIFIED]),
             );
             let done = dispatch(&ctx, PROBE_WIRE, &serde_json::json!({})).await;
