@@ -318,7 +318,7 @@ impl App {
             context_size: 0,
             input_draft: None,
             queued_messages: Vec::new(),
-            yolo: None,
+            yolo: self.permissions.persisted_yolo(),
         };
         session
     }
