@@ -11,9 +11,7 @@ use tracing::{debug, error, warn};
 use crate::mcp::{McpSession, TOOL_SEARCH_TOOL_NAME, UNKNOWN_MCP};
 use crate::task_set::TaskSet;
 use crate::tools::registry::{RegisteredTool, ToolInvocation};
-use crate::tools::{
-    CallOrigin, LocalTool, LocalToolFn, ToolAudience, ToolContext, ToolFilter, truncate_bytes,
-};
+use crate::tools::{CallOrigin, LocalTool, LocalToolFn, ToolAudience, ToolContext, truncate_bytes};
 use crate::{AgentError, AgentEvent, ToolDoneEvent, ToolOutput, ToolStartEvent};
 use maki_config::ToolKey;
 
@@ -171,13 +169,14 @@ pub struct Callable {
 /// would actually reach. It lives beside `resolve` so the two cannot drift into
 /// answering differently.
 ///
-/// Filtered like the request's tool array is: this context's audience, the
-/// config's `disabled_tools`, and the model's capabilities. What is left is the
-/// caller's own policy, read off `audience` (a sandbox wants `INTERPRETER`).
+/// Filtered by the same filter that built the request's tool array, so a name
+/// the model never saw is not one a script can reach either. What is left is
+/// the caller's own policy, read off `audience` (a sandbox wants
+/// `INTERPRETER`).
 ///
 /// Recompute per call: MCP republishes its index whenever a server comes or goes.
 pub fn callable(ctx: &ToolContext) -> Vec<Callable> {
-    let filter = ToolFilter::from_config(&ctx.config, &ctx.model, &[]);
+    let filter = &ctx.tool_filter;
     let mut out: Vec<Callable> = Vec::new();
     let mut claimed: HashSet<String> = HashSet::new();
     // A name belongs to the first source dispatch would reach, claimed before
@@ -737,13 +736,14 @@ mod tests {
     use crate::mcp::test_support::stub_session;
     use crate::mcp::tool_names;
     use crate::permissions::{PERMISSION_DENIED_PREFIX, PermissionManager};
+    use crate::template::Vars;
     use crate::tools::registry::{ToolRegistry, ToolSource};
     use crate::tools::test_support::{
         GUARDED_TOOL_NAME, GuardedMock, mock_tool, stub_ctx, stub_ctx_with_permissions,
     };
     use crate::tools::{
         BoxFuture, DescriptionContext, ExecFuture, HeaderFuture, HeaderResult, ParseError,
-        PermissionScopes, Tool, ToolAudience, ToolExecResult, local_tool,
+        PermissionScopes, RequestTools, Tool, ToolAudience, ToolExecResult, local_tool,
     };
 
     const TEST_ID: &str = "t1";
@@ -1105,13 +1105,27 @@ mod tests {
         assert!(native.schema.is_some(), "registry tools carry their schema");
     }
 
-    /// The sandbox gets the same tools the request's array does, so a tool the
-    /// user disabled is not reachable by writing a script instead.
-    #[test]
-    fn callable_drops_what_the_config_disabled() {
+    /// The sandbox gets the same tools the request's array does. Otherwise a
+    /// tool the user disabled, or one the host cannot service (ACP without
+    /// form elicitation drops `question`), comes back through a script.
+    #[test_case(&[PROBE_WIRE], &[]           ; "config_disabled")]
+    #[test_case(&[],           &[PROBE_WIRE] ; "host_excluded")]
+    fn callable_drops_what_the_requests_filter_dropped(disabled: &[&str], excluded: &[&str]) {
         let mut ctx = stub_ctx(&AgentMode::Build);
         ctx.registry = registry_with(&[PROBE_WIRE, OTHER_WIRE]);
-        ctx.config.disabled_tools = vec![PROBE_WIRE.to_owned()];
+        ctx.config.disabled_tools = disabled.iter().map(|n| (*n).to_owned()).collect();
+        let tools = RequestTools::build(
+            &ctx.registry,
+            &Vars::new(),
+            &ctx.model,
+            &ctx.config,
+            excluded,
+            false,
+            false,
+        );
+        ctx.tool_filter = Arc::clone(tools.filter());
+
+        assert_eq!(tool_names(tools.definitions()), [OTHER_WIRE]);
         assert_eq!(callable_names(&ctx), [OTHER_WIRE]);
     }
 

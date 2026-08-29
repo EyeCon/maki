@@ -7,9 +7,7 @@ use maki_agent::mcp::{McpHandle, McpSession};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::template;
 use maki_agent::template::Vars;
-use maki_agent::tools::{
-    DescriptionContext, FileReadTracker, ToolAudience, ToolFilter, ToolRegistry,
-};
+use maki_agent::tools::{FileReadTracker, RequestTools, ToolAudience, ToolRegistry};
 use maki_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentParams, AgentRunParams, CancelMap,
     CancelToken, CancelTrigger, DoneReason, Envelope, EventSender, History, Instructions,
@@ -19,7 +17,6 @@ use maki_config::ModelPolicy;
 use maki_lua::EventHandle;
 use maki_providers::{AgentError, Message, Model};
 use maki_storage::id::SessionRef;
-use serde_json::Value;
 use tracing::error;
 
 use super::ModelSlot;
@@ -32,7 +29,7 @@ pub(super) struct AgentLoop {
     tool_output_lines: ToolOutputLines,
     vars: Vars,
     instructions: Instructions,
-    tools: Value,
+    tools: RequestTools,
     mcp: Option<McpSession>,
     history: History,
     btw_system: Arc<ArcSwap<String>>,
@@ -82,7 +79,7 @@ impl AgentLoop {
             tool_output_lines,
             vars: Vars::default(),
             instructions: Instructions::default(),
-            tools: Value::Null,
+            tools: RequestTools::default(),
             mcp,
             history: History::restored(initial_history).with_mirror(shared_history),
             btw_system,
@@ -299,16 +296,16 @@ impl AgentLoop {
         self.tools = self.build_tools(model, workflow);
     }
 
-    fn build_tools(&self, model: &Model, workflow: bool) -> Value {
-        let examples = model.supports_tool_examples();
-        let filter = ToolFilter::from_config(&self.config, model, &[]);
-        let ctx = DescriptionContext {
-            filter: &filter,
-            audience: ToolAudience::MAIN,
+    fn build_tools(&self, model: &Model, workflow: bool) -> RequestTools {
+        RequestTools::build(
+            ToolRegistry::global(),
+            &self.vars,
+            model,
+            &self.config,
+            &[],
             workflow,
-            mcp: self.mcp.is_some(),
-        };
-        ToolRegistry::global().definitions(&self.vars, &ctx, examples)
+            self.mcp.is_some(),
+        )
     }
 
     async fn reload_instructions(&mut self) {

@@ -14,8 +14,8 @@ use maki_agent::tools::interpreter_bridge;
 use maki_agent::tools::registry::ToolRegistry;
 use maki_agent::tools::schema::sanitize_tool_input_schema;
 use maki_agent::tools::{
-    CallOrigin, Deadline, DescriptionContext, FileReadTracker, LocalTool, LocalTools, ToolAudience,
-    ToolContext, ToolFilter, ToolLive,
+    CallOrigin, Deadline, DescriptionContext, FileReadTracker, LocalTool, LocalTools, RequestTools,
+    ToolAudience, ToolContext, ToolFilter, ToolLive,
 };
 use maki_agent::{
     Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, DoneReason,
@@ -580,6 +580,10 @@ async fn session(
     let name = name.unwrap_or_default();
     info!(name = %name, model = %model.id, "subagent session opened");
 
+    // The array is the caller's, so only the filter half is derived here; it is
+    // what tells the session which names it may dispatch.
+    let tools = RequestTools::assembled(tools_json, &agent_ctx.config, &model);
+
     let state = SessionState {
         params: AgentParams {
             provider,
@@ -598,7 +602,7 @@ async fn session(
             model_policy: Arc::clone(&agent_ctx.model_policy),
         },
         system: system.unwrap_or_default(),
-        tools: tools_json,
+        tools,
         thinking,
         fast,
         mcp: agent_ctx
@@ -717,7 +721,7 @@ async fn dispatch_racing_live(
 struct SessionState {
     params: AgentParams,
     system: String,
-    tools: JsonValue,
+    tools: RequestTools,
     thinking: ThinkingConfig,
     fast: bool,
     /// Fresh per session so `tool_search` loads never leak between a

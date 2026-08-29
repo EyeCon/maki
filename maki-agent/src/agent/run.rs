@@ -18,7 +18,9 @@ use super::tool_dispatch::{self, RecentCalls};
 use crate::cancel::{CancelMap, CancelToken};
 use crate::mcp::McpSession;
 use crate::permissions::PermissionManager;
-use crate::tools::{Deadline, FileReadTracker, LocalTools, ToolAudience, ToolContext};
+use crate::tools::{
+    Deadline, FileReadTracker, LocalTools, RequestTools, ToolAudience, ToolContext,
+};
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, DoneReason, EventSender,
     ExtractedCommand, InterruptSource, SessionMailbox, TurnCompleteEvent,
@@ -84,7 +86,7 @@ pub struct AgentRunParams<'h> {
     pub history: &'h mut History,
     pub system: String,
     pub event_tx: EventSender,
-    pub tools: Value,
+    pub tools: RequestTools,
 }
 
 pub struct Agent<'h> {
@@ -93,7 +95,7 @@ pub struct Agent<'h> {
     history: &'h mut History,
     system: String,
     event_tx: EventSender,
-    tools: Value,
+    tools: RequestTools,
     mode: AgentMode,
     user_response_rx: Option<Arc<async_lock::Mutex<flume::Receiver<String>>>>,
     interrupt_source: Option<Arc<dyn InterruptSource>>,
@@ -290,11 +292,11 @@ impl<'h> Agent<'h> {
     fn request_tools(&self) -> Cow<'_, Value> {
         match &self.mcp {
             Some(mcp) => {
-                let mut tools = self.tools.clone();
+                let mut tools = self.tools.definitions().clone();
                 mcp.extend_tools(&mut tools);
                 Cow::Owned(tools)
             }
-            None => Cow::Borrowed(&self.tools),
+            None => Cow::Borrowed(self.tools.definitions()),
         }
     }
 
@@ -497,6 +499,7 @@ impl<'h> Agent<'h> {
             mcp: self.mcp.clone(),
             deadline: Deadline::None,
             config: self.config.clone(),
+            tool_filter: Arc::clone(self.tools.filter()),
             tool_output_lines: self.tool_output_lines,
             permissions: Arc::clone(&self.permissions),
             timeouts: self.timeouts,
@@ -810,7 +813,7 @@ mod tests {
                 history,
                 system: "system".into(),
                 event_tx: EventSender::new(raw_tx, 0),
-                tools: serde_json::json!([]),
+                tools: RequestTools::default(),
             },
         );
         (agent, event_rx)

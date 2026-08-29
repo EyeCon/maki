@@ -20,9 +20,7 @@ use crate::cancel::{CancelMap, CancelToken};
 use crate::permissions::{PermissionManager, PluginRuleStore};
 use crate::prompt::ResolvedSlots;
 use crate::template;
-use crate::tools::{
-    DescriptionContext, FileReadTracker, LocalTools, ToolAudience, ToolFilter, ToolRegistry,
-};
+use crate::tools::{FileReadTracker, LocalTools, RequestTools, ToolAudience, ToolRegistry};
 use crate::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope,
     EventSender, ImageSource, McpHandle, McpSession, PermissionsConfig, SessionMailbox, ToolOutput,
@@ -99,7 +97,7 @@ pub struct HeadlessHandle {
 struct AgentSetup {
     vars: template::Vars,
     instructions: agent::Instructions,
-    tools: Value,
+    tools: RequestTools,
 }
 
 /// Takes the handle rather than a second `bool`: two adjacent flags is one
@@ -113,13 +111,13 @@ fn setup(
 ) -> AgentSetup {
     let vars = template::env_vars();
     let instructions = agent::load_instructions(&vars.apply("{cwd}"));
-    let tools = tool_definitions(
+    let tools = RequestTools::build(
+        ToolRegistry::global(),
         &vars,
         model,
         config,
         excluded_tools,
         workflow,
-        ToolRegistry::global(),
         mcp.is_some(),
     );
 
@@ -128,27 +126,6 @@ fn setup(
         instructions,
         tools,
     }
-}
-
-/// Base definitions only. MCP definitions are injected per request by
-/// `Agent::request_tools`; storing them here would freeze the catalog.
-fn tool_definitions(
-    vars: &template::Vars,
-    model: &Model,
-    config: &AgentConfig,
-    excluded_tools: &[&'static str],
-    workflow: bool,
-    registry: &ToolRegistry,
-    mcp: bool,
-) -> Value {
-    let filter = ToolFilter::from_config(config, model, excluded_tools);
-    let ctx = DescriptionContext {
-        filter: &filter,
-        audience: ToolAudience::MAIN,
-        workflow,
-        mcp,
-    };
-    registry.definitions(vars, &ctx, model.supports_tool_examples())
 }
 
 /// Names advertised to SDK clients: base tools plus what the first request
@@ -185,7 +162,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     );
 
     let mcp = params.mcp_handle.clone().map(|h| McpSession::new(h, &[]));
-    let tool_names = advertised_tool_names(&tools, mcp.as_ref());
+    let tool_names = advertised_tool_names(tools.definitions(), mcp.as_ref());
 
     let (raw_tx, event_rx) = flume::unbounded::<Envelope>();
 
@@ -332,7 +309,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         .mcp_handle
         .clone()
         .map(|h| McpSession::new(h, &params.initial_history));
-    let tool_names = advertised_tool_names(&tools, mcp.as_ref());
+    let tool_names = advertised_tool_names(tools.definitions(), mcp.as_ref());
 
     let (raw_tx, event_rx) = flume::unbounded::<Envelope>();
     let (input_tx, input_rx) = flume::unbounded::<AgentInput>();
@@ -412,13 +389,13 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                     match provider::from_model_async(&mut new_model, params.timeouts).await {
                         Ok(p) => {
                             provider = Arc::from(p);
-                            tools = tool_definitions(
+                            tools = RequestTools::build(
+                                ToolRegistry::global(),
                                 &vars,
                                 &new_model,
                                 &params.config,
                                 &params.excluded_tools,
                                 params.workflow,
-                                ToolRegistry::global(),
                                 mcp.is_some(),
                             );
                             model = new_model;

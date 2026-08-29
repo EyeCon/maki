@@ -126,6 +126,69 @@ impl ToolFilter {
     }
 }
 
+/// The tool array one run sends to the model, paired with the filter that
+/// produced it. A run context carries the pair, never a loose array, so the
+/// names dispatch offers in-process (`tool_dispatch::callable`, and through it
+/// the `code_execution` sandbox) cannot drift from what the model was shown.
+#[derive(Clone)]
+pub struct RequestTools {
+    definitions: Value,
+    filter: Arc<ToolFilter>,
+}
+
+impl Default for RequestTools {
+    fn default() -> Self {
+        Self {
+            definitions: Value::Array(Vec::new()),
+            filter: Arc::default(),
+        }
+    }
+}
+
+impl RequestTools {
+    /// The one place a run's tool array is built. Host exclusions (a client
+    /// that cannot service `question`) go through here and nowhere else, so
+    /// the array and the filter always agree on them.
+    pub fn build(
+        registry: &ToolRegistry,
+        vars: &crate::template::Vars,
+        model: &Model,
+        config: &AgentConfig,
+        excluded: &[&str],
+        workflow: bool,
+        mcp: bool,
+    ) -> Self {
+        let filter = ToolFilter::from_config(config, model, excluded);
+        let ctx = DescriptionContext {
+            filter: &filter,
+            audience: ToolAudience::MAIN,
+            workflow,
+            mcp,
+        };
+        Self {
+            definitions: registry.definitions(vars, &ctx, model.supports_tool_examples()),
+            filter: Arc::new(filter),
+        }
+    }
+
+    /// For an array the host built itself, like a Lua subagent publishing what
+    /// its caller picked. Dispatch still answers to the config's own filter.
+    pub fn assembled(definitions: Value, config: &AgentConfig, model: &Model) -> Self {
+        Self {
+            definitions,
+            filter: Arc::new(ToolFilter::from_config(config, model, &[])),
+        }
+    }
+
+    pub fn definitions(&self) -> &Value {
+        &self.definitions
+    }
+
+    pub fn filter(&self) -> &Arc<ToolFilter> {
+        &self.filter
+    }
+}
+
 /// One gate for every definitions builder (main loop, headless, Lua): a model
 /// without vision never learns `view_image` exists.
 pub fn capability_exclusions(model: &Model) -> &'static [&'static str] {
@@ -248,6 +311,7 @@ pub struct ToolContext {
     pub mcp: Option<McpSession>,
     pub deadline: Deadline,
     pub config: AgentConfig,
+    pub tool_filter: Arc<ToolFilter>,
     pub tool_output_lines: ToolOutputLines,
     pub permissions: Arc<PermissionManager>,
     pub timeouts: maki_providers::Timeouts,
@@ -471,6 +535,7 @@ pub fn interpreter_ctx(
         mcp: None,
         deadline: Deadline::None,
         config: AgentConfig::default(),
+        tool_filter: Arc::default(),
         tool_output_lines: ToolOutputLines::default(),
         permissions,
         timeouts: maki_providers::Timeouts::default(),
