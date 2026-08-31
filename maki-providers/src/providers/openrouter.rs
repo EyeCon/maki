@@ -36,7 +36,9 @@ const FEATURES: &str = "300+ models from all providers, prompt caching, provider
 
 const DISCOVERY_NOTE: &str = "OpenRouter aggregates models from many providers behind a single API key. \
      Browse available models at [openrouter.ai/models](https://openrouter.ai/models). \
-     Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`).";
+     Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`), including \
+     preset references (e.g. `openrouter/@preset/my-slug`). Set `extra_body.preset` \
+     under `[openrouter]` in providers.toml to attach a preset while keeping an explicit model.";
 
 static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     slug: SLUG,

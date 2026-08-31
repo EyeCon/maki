@@ -84,9 +84,9 @@ fn resolve_custom_auth(slug: &str) -> Result<ResolvedAuth, AgentError> {
 
 pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
     let config = ProvidersConfig::load();
-    let protocol = config
-        .get(slug)
-        .and_then(|def| def.protocol)
+    let def = config.get(slug);
+    let protocol = def
+        .and_then(|d| d.protocol)
         .ok_or_else(|| AgentError::Config {
             message: format!("unknown custom provider '{slug}'"),
         })?;
@@ -98,7 +98,8 @@ pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, Agent
             auth, timeouts,
         ))),
         Protocol::Openai | Protocol::OpenaiResponses => Ok(Box::new(CustomOpenAiProvider {
-            compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts)
+                .with_extra_body(def.and_then(|d| d.extra_body.clone())),
             auth,
             protocol,
         })),
@@ -373,7 +374,9 @@ impl Provider for CustomOpenAiProvider {
             let auth = self.auth.lock().unwrap().clone();
 
             if self.protocol == Protocol::OpenaiResponses {
-                let body = responses::build_body(model, messages, system, tools);
+                let body = self
+                    .compat
+                    .wire_body(&responses::build_body(model, messages, system, tools));
                 // TODO: wire thinking budget into responses API when llama.cpp supports it
                 return responses::do_stream(
                     self.compat.client(),

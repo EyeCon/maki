@@ -8,6 +8,7 @@ use isahc::{AsyncReadResponseExt, HttpClient, Request};
 use maki_storage::id::MakiId;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
 use super::ResolvedAuth;
@@ -55,21 +56,51 @@ pub(crate) struct OpenAiCompatProvider {
     /// bare ollama host). Request-time `auth.base_url` still wins (custom,
     /// local, dynamic).
     resolved_base_url: Option<String>,
+    /// `providers.toml` `extra_body` fields merged into every inference body
+    /// just before it is serialized; configured values win over fields maki
+    /// computes.
+    extra_body: Option<BTreeMap<String, Value>>,
 }
 
 impl OpenAiCompatProvider {
     pub fn new(config: &'static OpenAiCompatConfig, timeouts: super::Timeouts) -> Self {
-        let resolved_base_url = if config.slug.is_empty() {
-            None
-        } else {
-            let providers = maki_config::providers::ProvidersConfig::load();
+        let providers =
+            (!config.slug.is_empty()).then(maki_config::providers::ProvidersConfig::load);
+        let resolved_base_url = providers.as_ref().and_then(|providers| {
             maki_config::providers::configured_base_url(config.slug, providers.get(config.slug))
-        };
+        });
+        let extra_body = providers
+            .as_ref()
+            .and_then(|providers| providers.get(config.slug))
+            .and_then(|def| def.extra_body.clone());
         Self {
             client: super::http_client(timeouts),
             config,
             stream_timeout: timeouts.stream,
             resolved_base_url,
+            extra_body,
+        }
+    }
+
+    /// Override the auto-resolved `extra_body` (custom providers resolve their
+    /// own definition since their compat config slug is empty).
+    pub(crate) fn with_extra_body(mut self, extra_body: Option<BTreeMap<String, Value>>) -> Self {
+        self.extra_body = extra_body;
+        self
+    }
+
+    /// The body sent on the wire: the provider-built body with `extra_body`
+    /// fields applied last so configured values win over fields maki computes.
+    pub(crate) fn wire_body(&self, body: &Value) -> Value {
+        match &self.extra_body {
+            None => body.clone(),
+            Some(extra) => {
+                let mut merged = body.clone();
+                for (key, value) in extra {
+                    merged[key.as_str()] = value.clone();
+                }
+                merged
+            }
         }
     }
 
@@ -191,7 +222,7 @@ impl OpenAiCompatProvider {
         event_tx: &Sender<ProviderEvent>,
         auth: &ResolvedAuth,
     ) -> Result<StreamResponse, AgentError> {
-        let json_body = serde_json::to_vec(body)?;
+        let json_body = serde_json::to_vec(&self.wire_body(body))?;
         let mut request = self
             .build_request("POST", "/chat/completions", auth)
             .header("content-type", "application/json");
@@ -1398,5 +1429,174 @@ data: [DONE]\n";
             assert_eq!(text_deltas, vec!["Hello"]);
             assert_eq!(thinking_deltas, vec!["Let me think", "..."]);
         })
+    }
+
+    static TEST_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+        slug: "test",
+        api_key_env: "",
+        base_url: "http://localhost:1",
+        max_tokens_field: "max_tokens",
+        include_stream_usage: true,
+        provider_name: "test",
+    };
+
+    fn compat_with_extra(extra: Option<BTreeMap<String, Value>>) -> OpenAiCompatProvider {
+        OpenAiCompatProvider {
+            client: HttpClient::new().unwrap(),
+            config: &TEST_CONFIG,
+            stream_timeout: TEST_STREAM_TIMEOUT,
+            resolved_base_url: None,
+            extra_body: extra,
+        }
+    }
+
+    fn extra_body(pairs: &[(&str, Value)]) -> Option<BTreeMap<String, Value>> {
+        Some(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn wire_body_without_extra_body_passes_body_through() {
+        let compat = compat_with_extra(None);
+        let body = json!({"model": "m", "messages": []});
+        assert_eq!(compat.wire_body(&body), body);
+    }
+
+    #[test]
+    fn wire_body_merges_extra_fields_over_computed() {
+        let compat = compat_with_extra(extra_body(&[
+            ("preset", json!("email-copywriter")),
+            ("model", json!("override")),
+        ]));
+        let merged = compat.wire_body(&json!({"model": "m", "stream": true}));
+        assert_eq!(
+            merged,
+            json!({"model": "override", "stream": true, "preset": "email-copywriter"})
+        );
+    }
+
+    fn test_model() -> crate::model::Model {
+        crate::model::Model {
+            id: "test-model".into(),
+            provider: "test".into(),
+            tier: crate::model::ModelTier::Medium,
+            family: crate::model::ModelFamily::Generic,
+            supports_tool_examples_override: None,
+            thinking_override: None,
+            supports_vision_override: None,
+            supports_fast_override: None,
+            pricing: crate::model::ModelPricing::default(),
+            subsidised_by: None,
+            discovered_free: false,
+            max_output_tokens: Some(8192),
+            turn_output_tokens: None,
+            context_window: 200_000,
+            thinking_fields: None,
+        }
+    }
+
+    /// One-shot local HTTP endpoint: reads a single request (head plus a
+    /// `content-length` body), reports `(path, parsed body)` on `hits`, and
+    /// replies with `response`.
+    fn spawn_mock_endpoint(
+        response: String,
+        hits: std::sync::mpsc::Sender<(String, Value)>,
+    ) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+                head.extend_from_slice(&buf[..n]);
+                if let Some(split) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let (head, rest) = head.split_at(split + 4);
+                    let head = String::from_utf8_lossy(head).into_owned();
+                    let path = head
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .split(' ')
+                        .nth(1)
+                        .unwrap()
+                        .to_string();
+                    let content_length = head
+                        .lines()
+                        .find_map(|l| {
+                            let (name, value) = l.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    let mut body = rest.to_vec();
+                    while body.len() < content_length {
+                        let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+                        body.extend_from_slice(&buf[..n]);
+                    }
+                    let parsed: Value =
+                        serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    let _ = hits.send((path, parsed));
+                    std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
+                    return;
+                }
+            }
+        });
+        port
+    }
+
+    const STREAM_OK_SSE: &str = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\
+\n\
+data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\
+\n\
+data: [DONE]\n\n";
+
+    /// Regression: the body serialized to the socket is `wire_body`'s output,
+    /// so `extra_body` fields ride along on the wire and fields maki computes
+    /// stay next to them.
+    #[test]
+    fn do_stream_sends_the_wire_body() {
+        let (hits_tx, hits_rx) = std::sync::mpsc::channel();
+        let port = spawn_mock_endpoint(
+            format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{STREAM_OK_SSE}"),
+            hits_tx,
+        );
+        let compat = compat_with_extra(extra_body(&[(
+            "preset",
+            json!("email-copywriter"),
+        )]));
+        let auth =
+            ResolvedAuth::for_test(Some(format!("http://127.0.0.1:{port}")), Vec::new());
+        let model = test_model();
+        let (tx, rx) = flume::unbounded();
+        smol::block_on(async {
+            let body = compat.build_body(&model, &[Message::default()], "system", &json!([]));
+            let resp = compat
+                .do_stream(&model, &[], &body, &tx, &auth)
+                .await
+                .unwrap();
+            assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+            assert_eq!(resp.usage.output, 2);
+        });
+        let (path, sent) = hits_rx.recv_timeout(TEST_STREAM_TIMEOUT).unwrap();
+        assert_eq!(path, "/chat/completions");
+        assert_eq!(sent["model"], json!("test-model"));
+        assert_eq!(sent["preset"], json!("email-copywriter"));
+        assert_eq!(
+            sent["stream_options"],
+            json!({"include_usage": true}),
+            "computed fields stay in the body next to the extra ones"
+        );
+        let deltas: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(
+            deltas.as_slice(),
+            [ProviderEvent::TextDelta { text }] if text == "ok"
+        ));
     }
 }

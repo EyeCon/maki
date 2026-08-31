@@ -181,6 +181,7 @@ supports_vision = false
 | `subsidised_by` | string | Name of the flat subscription prepaying this provider (e.g. `"Max"`). Models bill $0 and show the published list price beside it as a reference. The list-price fallback needs `protocol = "anthropic"` |
 | `models` | array | Declared models for custom providers (see below) |
 | `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
+| `extra_body` | table | OpenAI-compat providers. JSON fields merged into every request body, overriding fields maki computes (e.g. `preset = "my-slug"` for an OpenRouter preset) |
 
 ### Model fields
 
