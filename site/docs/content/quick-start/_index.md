@@ -11,7 +11,7 @@ Install Maki, connect a provider, run a first session. A few minutes, start to f
 
 ## Install
 
-### Linux / macOS
+### Linux
 
 ```sh
 # Download and read the script first (don't blindly trust shell scripts).
