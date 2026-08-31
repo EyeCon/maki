@@ -106,8 +106,7 @@ main() {
     else
         case "$(uname -s)" in
             Linux)  os="unknown-linux-musl" ;;
-            Darwin) os="apple-darwin" ;;
-            *) err "unsupported OS: $(uname -s)" ;;
+            *) err "unsupported OS: $(uname -s) (this branch builds for Linux and Windows only)" ;;
         esac
 
         case "$(uname -m)" in
@@ -126,7 +125,15 @@ main() {
     tag="${1:-$(latest_tag)}"
     [ -n "${tag}" ] || err "failed to determine latest release tag"
 
-    url="https://github.com/${REPO}/releases/download/${tag}/${BINARY}-${tag}-${target}.${archive_ext}"
+    # The rolling release names assets with a build stamp, so pick the asset
+    # by platform suffix instead of reconstructing the exact name.
+    asset_url="$(github_curl "https://api.github.com/repos/${REPO}/releases/tags/${tag}" \
+        | tr ',' '\n' \
+        | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | grep -F -- "${target}.${archive_ext}" \
+        | head -n 1)"
+    [ -n "${asset_url}" ] || err "release ${tag} has no asset for ${target}"
+    url="${asset_url}"
     tmp="$(mktemp -d)"
     trap 'rm -rf "${tmp}"' EXIT
 

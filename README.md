@@ -66,7 +66,7 @@ An AI coding agent optimized for minimal use of context tokens, while providing 
 
 ## Installation
 
-### Linux / macOS
+### Linux
 
 ```sh
 # Download and read the script first (don't blindly trust shell scripts).
