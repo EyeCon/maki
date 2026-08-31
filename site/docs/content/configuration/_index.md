@@ -317,7 +317,7 @@ Maki follows platform directory conventions. On Linux and macOS that is XDG. On 
 | Logs | `~/.local/logs/maki/` | `%APPDATA%\maki\` |
 | Cache | `~/.cache/maki/` | `%LOCALAPPDATA%\maki\` |
 
-Config holds `init.lua`, `permissions.toml`, `mcp.toml`, `providers.toml`, and `commands/`. State holds sessions, auth tokens, memories, plans, and model-tier overrides. The install script puts the binary under `%LOCALAPPDATA%\maki` on Windows; that is separate from these runtime dirs.
+Config holds `init.lua`, `metaconfig.toml`, `permissions.toml`, `mcp.toml`, `providers.toml`, and `commands/`. State holds sessions, auth tokens, memories, plans, and model-tier overrides. The install script puts the binary under `%LOCALAPPDATA%\maki` on Windows; that is separate from these runtime dirs.
 
 `~/.maki/` (or `%USERPROFILE%\.maki\`) is checked as a legacy fallback. If that directory still exists, maki uses it for everything until you migrate.
 
@@ -330,6 +330,23 @@ maki migrate xdg
 This safely moves sessions, auth, plans, memories, logs, and preferences to the platform locations above. Where both old and new files exist, they are merged (input history, model tiers, etc.). Nothing is deleted until it has been copied. At the end you get a summary of where everything lives now.
 
 Safe to run more than once.
+
+## Redirecting config files
+
+`metaconfig.toml` changes where Maki reads the other config files from. Maki looks for it at `.maki/metaconfig.toml` in your working directory first, then in the config directory. The first one found applies. It is read once at startup.
+
+```toml
+[files]
+"providers.toml" = "alt/providers.toml"
+"permissions.toml" = "alt"
+"mcp.toml" = "~/dotfiles/maki/mcp.toml"
+```
+
+A value that names an existing file replaces the search for that name entirely. A value that names a directory (or a path that does not exist yet) acts as an alternate config tree: Maki looks for the same file name inside it before the regular config directories, and falls back to them when the file is missing there.
+
+Keys are file and directory names as they appear in the config directory: `providers.toml`, `permissions.toml`, `mcp.toml`, `init.lua`, `.env`, `providers/`, `commands/`, and `themes/`. Relative paths resolve against the directory holding `metaconfig.toml`. A broken `metaconfig.toml` logs a warning and is ignored, so the regular locations keep working.
+
+The redirect covers the global files. Project files such as `.maki/init.lua` keep their fixed locations.
 
 ## Personal Instructions
 

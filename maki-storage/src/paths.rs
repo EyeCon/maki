@@ -302,10 +302,7 @@ pub fn config_search_dirs() -> Vec<PathBuf> {
 }
 
 pub fn find_config_path(name: &str) -> Option<PathBuf> {
-    config_search_dirs()
-        .into_iter()
-        .map(|dir| dir.join(name))
-        .find(|path| path.exists())
+    super::metaconfig::find(name)
 }
 
 /// Pure core of `config_search_dirs`: no env reads, no process-home fallback,

@@ -105,6 +105,12 @@ fn discover_commands_inner(
         }
     }
 
+    // Scanned last within the user scope: the metaconfig redirect outranks the
+    // config dirs and third-party dirs it replaces, but not project commands.
+    if let Some(dir) = maki_storage::metaconfig::dir_override(COMMANDS_DIR) {
+        scan_command_dir(&dir, CommandScope::User, &mut commands);
+    }
+
     for dir in find_project_ancestor_dirs(cwd) {
         for cmd_dir in PROJECT_COMMAND_DIRS {
             scan_command_dir(&dir.join(cmd_dir), CommandScope::Project, &mut commands);

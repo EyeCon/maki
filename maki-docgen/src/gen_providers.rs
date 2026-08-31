@@ -158,6 +158,8 @@ Env `<SLUG>_BASE_URL` still wins over both the plan and a `base_url` in this fil
 1. Tweak a built-in (pick a plan, change its base URL, set `enable_free_models` for Opencode).
 2. Declare a custom provider that speaks OpenAI, Anthropic, or Google wire format.
 
+To read `providers.toml` (and the other config files) from somewhere else, see [metaconfig.toml](/docs/configuration/#redirecting-config-files).
+
 ```toml
 # Point a built-in at a proxy. Env vars still win over this file.
 [anthropic]
@@ -205,6 +207,8 @@ supports_vision = false
 | `enable_free_models` | bool | Opencode only. Show free catalog models (default false) |
 | `models` | array | Declared models for custom providers (see below) |
 | `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
+| `extra_body` | table | OpenAI-compat providers. JSON fields merged into every request body, overriding fields maki computes (e.g. `preset = "my-slug"` for an OpenRouter preset) |
+| `extra_body_policy` | table | OpenAI-compat providers. How each `extra_body` key combines with the field maki computes: `merge` (objects merge recursively, arrays concatenate, scalars replace), `replace` (default), or `remove` (delete the computed field; a configured value is ignored) |
 
 ### Model fields
 
@@ -504,7 +508,9 @@ fn no_catalog_note(kind: ProviderKind) -> &'static str {
         ProviderKind::OpenRouter => {
             "OpenRouter aggregates models from many providers behind a single API key. \
              Browse available models at [openrouter.ai/models](https://openrouter.ai/models). \
-             Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`)."
+             Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`), including \
+             preset references (e.g. `openrouter/@preset/my-slug`). Set `extra_body.preset` \
+             under `[openrouter]` in providers.toml to attach a preset while keeping an explicit model."
         }
         _ => "No hardcoded model catalog. Use any model ID supported by this provider.",
     }

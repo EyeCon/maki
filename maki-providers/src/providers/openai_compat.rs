@@ -5,12 +5,14 @@ use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
 use super::ResolvedAuth;
 use crate::{
     AgentError, ContentBlock, Message, ProviderEvent, Role, StopReason, StreamResponse, TokenUsage,
 };
+use maki_config::providers::ExtraBodyPolicy;
 
 const STREAM_DONE: &str = "[DONE]";
 /// `tool_calls[].index` comes straight off the wire; a bogus huge value must
@@ -36,22 +38,104 @@ pub(crate) struct OpenAiCompatProvider {
     /// bare ollama host). Request-time `auth.base_url` still wins (custom,
     /// local, dynamic).
     resolved_base_url: Option<String>,
+    /// `providers.toml` `extra_body` fields merged into every inference body
+    /// just before it is serialized, per `extra_body_policy` (default
+    /// `replace`).
+    extra_body: Option<BTreeMap<String, Value>>,
+    extra_body_policy: Option<BTreeMap<String, ExtraBodyPolicy>>,
+}
+
+/// Recursively merges `extra` into `computed`: objects merge key-wise, arrays
+/// concatenate, anything else (scalars and type mismatches) takes `extra`.
+fn merge_extra(computed: &mut Value, extra: &Value) {
+    match extra {
+        Value::Object(extra) => match computed {
+            Value::Object(fields) => {
+                for (key, value) in extra {
+                    match fields.get_mut(key) {
+                        Some(field) => merge_extra(field, value),
+                        None => {
+                            fields.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+            _ => *computed = Value::Object(extra.clone()),
+        },
+        Value::Array(extra) => match computed {
+            Value::Array(items) => items.extend(extra.iter().cloned()),
+            _ => *computed = Value::Array(extra.clone()),
+        },
+        _ => *computed = extra.clone(),
+    }
 }
 
 impl OpenAiCompatProvider {
     pub fn new(config: &'static OpenAiCompatConfig, timeouts: super::Timeouts) -> Self {
-        let resolved_base_url = if config.slug.is_empty() {
-            None
-        } else {
-            let providers = maki_config::providers::ProvidersConfig::load();
-            maki_config::providers::configured_base_url(config.slug, providers.get(config.slug))
-        };
+        let providers =
+            (!config.slug.is_empty()).then(maki_config::providers::ProvidersConfig::load);
+        let def = providers
+            .as_ref()
+            .and_then(|providers| providers.get(config.slug));
+        let resolved_base_url = maki_config::providers::configured_base_url(config.slug, def);
+        let extra_body = def.and_then(|def| def.extra_body.clone());
+        let extra_body_policy = def.and_then(|def| def.extra_body_policy.clone());
         Self {
             client: super::http_client(timeouts),
             config,
             stream_timeout: timeouts.stream,
             resolved_base_url,
+            extra_body,
+            extra_body_policy,
         }
+    }
+
+    /// Override the auto-resolved `extra_body` (custom providers resolve their
+    /// own definition since their compat config slug is empty).
+    pub(crate) fn with_extra_body(
+        mut self,
+        extra_body: Option<BTreeMap<String, Value>>,
+        extra_body_policy: Option<BTreeMap<String, ExtraBodyPolicy>>,
+    ) -> Self {
+        self.extra_body = extra_body;
+        self.extra_body_policy = extra_body_policy;
+        self
+    }
+
+    /// The body sent on the wire: the provider-built body with `extra_body`
+    /// fields applied per `extra_body_policy` — `merge` combines with the
+    /// computed value (objects merge recursively, arrays concatenate, scalars
+    /// replace), `remove` deletes it, default `replace` overwrites it.
+    pub(crate) fn wire_body(&self, body: &Value) -> Value {
+        let mut merged = body.clone();
+        if let Some(extra) = &self.extra_body {
+            for (key, value) in extra {
+                match self.policy(key) {
+                    ExtraBodyPolicy::Merge => match merged.get_mut(key.as_str()) {
+                        Some(computed) => merge_extra(computed, value),
+                        None => merged[key.as_str()] = value.clone(),
+                    },
+                    ExtraBodyPolicy::Replace => merged[key.as_str()] = value.clone(),
+                    ExtraBodyPolicy::Remove => {}
+                }
+            }
+        }
+        for (key, mode) in self.extra_body_policy.iter().flatten() {
+            if *mode == ExtraBodyPolicy::Remove
+                && let Some(fields) = merged.as_object_mut()
+            {
+                fields.remove(key);
+            }
+        }
+        merged
+    }
+
+    fn policy(&self, key: &str) -> ExtraBodyPolicy {
+        self.extra_body_policy
+            .as_ref()
+            .and_then(|policy| policy.get(key))
+            .copied()
+            .unwrap_or(ExtraBodyPolicy::Replace)
     }
 
     pub(crate) fn client(&self) -> &HttpClient {
@@ -172,7 +256,8 @@ impl OpenAiCompatProvider {
         event_tx: &Sender<ProviderEvent>,
         auth: &ResolvedAuth,
     ) -> Result<StreamResponse, AgentError> {
-        let json_body = serde_json::to_vec(body)?;
+        let json_body = serde_json::to_vec(&self.wire_body(body))?;
+        super::log_wire_body("chat_completions", &json_body);
         let mut request = self
             .build_request("POST", "/chat/completions", auth)
             .header("content-type", "application/json");
@@ -1269,5 +1354,148 @@ data: [DONE]\n";
             assert_eq!(text_deltas, vec!["Hello"]);
             assert_eq!(thinking_deltas, vec!["Let me think", "..."]);
         })
+    }
+
+    static TEST_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+        slug: "test",
+        api_key_env: "",
+        base_url: "http://localhost:1",
+        max_tokens_field: "max_tokens",
+        include_stream_usage: true,
+        provider_name: "test",
+    };
+
+    fn compat_with(
+        extra: Option<BTreeMap<String, Value>>,
+        policy: Option<BTreeMap<String, ExtraBodyPolicy>>,
+    ) -> OpenAiCompatProvider {
+        OpenAiCompatProvider {
+            client: HttpClient::new().unwrap(),
+            config: &TEST_CONFIG,
+            stream_timeout: TEST_STREAM_TIMEOUT,
+            resolved_base_url: None,
+            extra_body: extra,
+            extra_body_policy: policy,
+        }
+    }
+
+    fn compat_with_extra(extra: Option<BTreeMap<String, Value>>) -> OpenAiCompatProvider {
+        compat_with(extra, None)
+    }
+
+    fn extra_body(pairs: &[(&str, Value)]) -> Option<BTreeMap<String, Value>> {
+        Some(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn wire_body_without_extra_body_passes_body_through() {
+        let compat = compat_with_extra(None);
+        let body = json!({"model": "m", "messages": []});
+        assert_eq!(compat.wire_body(&body), body);
+    }
+
+    #[test]
+    fn wire_body_merges_extra_fields_over_computed() {
+        let compat = compat_with_extra(extra_body(&[
+            ("preset", json!("email-copywriter")),
+            ("model", json!("override")),
+        ]));
+        let merged = compat.wire_body(&json!({"model": "m", "stream": true}));
+        assert_eq!(
+            merged,
+            json!({"model": "override", "stream": true, "preset": "email-copywriter"})
+        );
+    }
+
+    #[test]
+    fn wire_body_extra_tools_replace_without_policy() {
+        let compat = compat_with_extra(extra_body(&[(
+            "tools",
+            json!([{"type": "openrouter:web_search"}]),
+        )]));
+        let merged = compat.wire_body(&json!({
+            "tools": [{"type": "function", "function": {"name": "bash"}}]
+        }));
+        assert_eq!(merged["tools"], json!([{"type": "openrouter:web_search"}]));
+    }
+
+    fn merge_policy(
+        pairs: &[(&str, ExtraBodyPolicy)],
+    ) -> Option<BTreeMap<String, ExtraBodyPolicy>> {
+        Some(pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect())
+    }
+
+    #[test]
+    fn wire_body_merge_policy_appends_extra_tools() {
+        let compat = compat_with(
+            extra_body(&[("tools", json!([{"type": "openrouter:web_search"}]))]),
+            merge_policy(&[("tools", ExtraBodyPolicy::Merge)]),
+        );
+        let merged = compat.wire_body(&json!({
+            "tools": [{"type": "function", "function": {"name": "bash"}}]
+        }));
+        assert_eq!(
+            merged["tools"],
+            json!([
+                {"type": "function", "function": {"name": "bash"}},
+                {"type": "openrouter:web_search"},
+            ])
+        );
+    }
+
+    #[test]
+    fn wire_body_merge_policy_sets_missing_computed_field() {
+        let compat = compat_with(
+            extra_body(&[("tools", json!([{"type": "openrouter:web_search"}]))]),
+            merge_policy(&[("tools", ExtraBodyPolicy::Merge)]),
+        );
+        let merged = compat.wire_body(&json!({"model": "m"}));
+        assert_eq!(merged["tools"], json!([{"type": "openrouter:web_search"}]));
+    }
+
+    #[test]
+    fn wire_body_merge_policy_merges_nested_objects() {
+        let compat = compat_with(
+            extra_body(&[("stream_options", json!({"include_usage": false}))]),
+            merge_policy(&[("stream_options", ExtraBodyPolicy::Merge)]),
+        );
+        let merged = compat.wire_body(&json!({
+            "stream_options": {"include_usage": true, "other": 1}
+        }));
+        assert_eq!(
+            merged["stream_options"],
+            json!({"include_usage": false, "other": 1})
+        );
+    }
+
+    #[test]
+    fn wire_body_remove_policy_drops_computed_field() {
+        let compat = compat_with(
+            Some(BTreeMap::new()),
+            merge_policy(&[("stream_options", ExtraBodyPolicy::Remove)]),
+        );
+        let merged = compat.wire_body(&json!({
+            "model": "m",
+            "stream_options": {"include_usage": true}
+        }));
+        assert_eq!(merged, json!({"model": "m"}));
+    }
+
+    #[test]
+    fn wire_body_remove_policy_ignores_configured_value() {
+        let compat = compat_with(
+            extra_body(&[("stream_options", json!({"include_usage": false}))]),
+            merge_policy(&[("stream_options", ExtraBodyPolicy::Remove)]),
+        );
+        let merged = compat.wire_body(&json!({
+            "model": "m",
+            "stream_options": {"include_usage": true}
+        }));
+        assert_eq!(merged, json!({"model": "m"}));
     }
 }
