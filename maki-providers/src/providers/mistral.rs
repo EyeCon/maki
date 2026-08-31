@@ -235,7 +235,7 @@ impl Provider for Mistral {
         Box::pin(async move {
             let auth = self.auth.lock().unwrap().clone();
             self.compat
-                .fetch_and_parse_models(&auth, |m| {
+                .fetch_and_parse_models(&auth, "/models", |m| {
                     // Filter: only completion_chat capable models
                     let has_completion_chat = m
                         .get("capabilities")
