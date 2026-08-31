@@ -55,22 +55,18 @@ curl -fsSL https://maki.sh/install.sh | sh
 
 Both install to `%LOCALAPPDATA%\maki` and add it to your user PATH. Override with `MAKI_INSTALL_DIR` / `$env:MAKI_INSTALL_DIR`.
 
-### Living on the edge (main branch)
-
 ```sh
 cargo install --locked --git https://github.com/tontinton/maki.git maki
 ```
+Both install to `%LOCALAPPDATA%\maki` and add it to your user PATH. Override with `MAKI_INSTALL_DIR` / `$env:MAKI_INSTALL_DIR`.
 
-### With Nix
+### Living on the edge (main branch)
 
 ```sh
-nix run github:tontinton/maki
-```
-
-Or download a pre-built binary from [GitHub Releases](https://github.com/tontinton/maki/releases/latest).
 
 ## Connect a provider
 
+```bash
 ```bash
 maki auth login              # interactive picker (OAuth or API key)
 export ANTHROPIC_API_KEY=... # or just export a key
