@@ -37,6 +37,7 @@ pub enum Language {
     Json,
     Make,
     Clojure,
+    Nim,
 }
 
 impl Language {
@@ -77,6 +78,7 @@ impl Language {
             "json" => Some(Self::Json),
             "make" => Some(Self::Make),
             "clojure" => Some(Self::Clojure),
+            "nim" => Some(Self::Nim),
             _ => None,
         }
     }
@@ -118,6 +120,7 @@ impl Language {
             "json" => Some(Self::Json),
             "mk" => Some(Self::Make),
             "clj" | "cljs" | "cljc" | "bb" => Some(Self::Clojure),
+            "nim" | "nims" | "nimble" => Some(Self::Nim),
             _ => None,
         }
     }
@@ -159,6 +162,7 @@ impl Language {
             Self::Json => tree_sitter_json::LANGUAGE.into(),
             Self::Make => tree_sitter_make::LANGUAGE.into(),
             Self::Clojure => tree_sitter_clojure_orchard::LANGUAGE.into(),
+            Self::Nim => tree_sitter_nim::language(),
         }
     }
 }
@@ -172,6 +176,16 @@ mod tests {
 
     const JSX_SOURCE: &str = "export const x = <T a={<B c={d} />} />;";
     const TYPE_ASSERTION_SOURCE: &str = "const x = <T>y;";
+    const NIM_SOURCE: &str = "proc greet(name: string): string =\n  return \"hello \" & name\n";
+
+    #[test_case("nim")]
+    #[test_case("nims")]
+    #[test_case("nimble")]
+    fn nim_extension_resolves_and_parses(ext: &str) {
+        let lang = Language::from_extension(ext).expect("nim extension maps");
+        assert_eq!(lang, Language::Nim);
+        assert!(parses_cleanly(lang, NIM_SOURCE));
+    }
 
     fn parses_cleanly(lang: Language, source: &str) -> bool {
         let mut parser = Parser::new();
