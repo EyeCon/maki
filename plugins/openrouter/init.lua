@@ -8,7 +8,9 @@
 
 local parse = require("maki.provider_parse")
 
-local MODELS_PATH = "/models"
+-- The key-filtered listing: `/models/user` only names the models this key can
+-- actually call, unlike the public catalog at `/models`.
+local MODELS_PATH = "/models/user"
 local TEXT_MODALITY = "text"
 local IMAGE_MODALITY = "image"
 local REASONING_PARAMETER = "reasoning"
