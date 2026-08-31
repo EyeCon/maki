@@ -73,14 +73,16 @@ pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, Agent
     let auth = Arc::new(Mutex::new(resolved));
 
     let config = ProvidersConfig::load();
-    let protocol = resolve_protocol(slug, config.get(slug)).unwrap_or(Protocol::Openai);
+    let def = config.get(slug);
+    let protocol = resolve_protocol(slug, def).unwrap_or(Protocol::Openai);
 
     match kind {
         ProviderKind::Anthropic => Ok(Box::new(super::anthropic::Anthropic::with_auth(
             auth, timeouts,
         ))),
         ProviderKind::OpenAi => Ok(Box::new(CustomOpenAiProvider {
-            compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts)
+                .with_extra_body(def.and_then(|d| d.extra_body.clone())),
             auth,
             protocol,
         })),
@@ -284,7 +286,9 @@ impl Provider for CustomOpenAiProvider {
             let auth = self.auth.lock().unwrap().clone();
 
             if self.protocol == Protocol::OpenaiResponses {
-                let body = responses::build_body(model, messages, system, tools);
+                let body = self
+                    .compat
+                    .wire_body(&responses::build_body(model, messages, system, tools));
                 // TODO: wire thinking budget into responses API when llama.cpp supports it
                 return responses::do_stream(
                     self.compat.client(),
