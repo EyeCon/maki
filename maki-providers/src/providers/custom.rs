@@ -61,9 +61,9 @@ fn resolve_custom_auth(slug: &str) -> Result<(ResolvedAuth, String), AgentError>
 
 pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
     let config = ProvidersConfig::load();
-    let protocol = config
-        .get(slug)
-        .and_then(|def| def.protocol)
+    let def = config.get(slug);
+    let protocol = def
+        .and_then(|d| d.protocol)
         .ok_or_else(|| AgentError::Config {
             message: format!("unknown custom provider '{slug}'"),
         })?;
