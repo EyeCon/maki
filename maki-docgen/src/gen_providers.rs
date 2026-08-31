@@ -197,6 +197,7 @@ supports_vision = false
 | `supports_deferred_tools` | bool | The endpoint can load a deferred MCP tool without rewriting the cached tools prefix (see [MCP](../mcp/#loads-and-the-prompt-cache)). True for Anthropic direct and Bedrock. A custom `protocol = "anthropic"` provider, or a built-in pointed at another `base_url`, defaults to false and opts in here |
 | `models` | array | Declared models for custom providers (see below) |
 | `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
+| `extra_body` | table | OpenAI-compat providers. JSON fields merged into every request body, overriding fields maki computes (e.g. `preset = "my-slug"` for an OpenRouter preset) |
 
 ### Model fields
 

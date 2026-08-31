@@ -209,6 +209,74 @@ Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` to your
 
 Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
 
+\\\\\\\        to: xwzyxtxr 72b62e63 "feat(providers): inject extra body fields into API requests" (rebased revision)
+ ### DeepSeek
+ 
+ - **Env var**: `DEEPSEEK_API_KEY`
+ - **API**: `https://api.deepseek.com`
+ - **Features**: Thinking mode toggle (on/off), open-weight models
+ - **Peak pricing**: the prices below are off-peak; each turn is billed as it happens, at 2x during 01:00-04:00, 06:00-10:00 UTC, Mon-Fri
+ 
+ | Tier | Models | Pricing (in/out per 1M tokens) | Context |
+ |------|--------|-------------------------------|---------|
+ | Medium | **deepseek-flash, deepseek-v4-flash** (default) | $0.15 / $0.60 | 1000K ctx / 384K out |
+ | Strong | **deepseek-v4-pro** (default) | $0.66 / $1.98 | 1000K ctx / 384K out |
+ 
+ Defaults: deepseek-flash (medium), deepseek-v4-pro (strong)
+ 
+ ### OpenRouter
+ 
+ - **Env var**: `OPENROUTER_API_KEY`
+ - **API**: `https://openrouter.ai/api/v1`
+ - **Features**: 300+ models from all providers, prompt caching, provider routing
+ 
+-OpenRouter aggregates models from many providers behind a single API key. Browse available models at [openrouter.ai/models](https://openrouter.ai/models). Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`).
++OpenRouter aggregates models from many providers behind a single API key. Browse available models at [openrouter.ai/models](https://openrouter.ai/models). Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`), including preset references (e.g. `openrouter/@preset/my-slug`). Set `extra_body.preset` under `[openrouter]` in providers.toml to attach a preset while keeping an explicit model.
+ 
+ ### Requesty
+ 
+ - **Env var**: `REQUESTY_API_KEY`
+ - **API**: `https://router.requesty.ai/v1`
+ - **Features**: 700+ models behind one key, curated managed routing policies, EU region via `REQUESTY_BASE_URL`
+ 
+ Requesty routes 700+ models from many providers behind a single API key. Models are listed live from the API: curated managed policies first (short ids such as `requesty/claude-sonnet-4-5` or `requesty/gpt-5.4-mini`, `@eu` variants route only through EU providers), then the full `<vendor>/<model>` catalog (e.g. `requesty/openai/gpt-4o-mini`). Get a key at [app.requesty.ai/api-keys](https://app.requesty.ai/api-keys). Set `REQUESTY_BASE_URL=https://router.eu.requesty.ai/v1` to keep all traffic in the EU.
+ 
+ ### Synthetic
+ 
+ - **Env var**: `SYNTHETIC_API_KEY`
+ - **API**: `https://api.synthetic.new/openai/v1`
+ - **Features**: Reasoning effort support (low/medium/high), open-weight models
+ 
+ | Tier | Models | Pricing (in/out per 1M tokens) | Context |
+ |------|--------|-------------------------------|---------|
+ | Weak | **hf:zai-org/GLM-4.7-Flash** (default) | $0.10 / $0.50 | 200K ctx / 131K out |
+ | Medium | **hf:deepseek-ai/DeepSeek-V3.2** (default) | $0.56 / $1.68 | 200K ctx / 131K out |
+ | Strong | **hf:moonshotai/Kimi-K2.5** (default) | $0.45 / $3.40 | 200K ctx / 131K out |
+ 
+ Defaults: hf:moonshotai/Kimi-K2.5 (strong), hf:deepseek-ai/DeepSeek-V3.2 (medium), hf:zai-org/GLM-4.7-Flash (weak)
+ 
+ ### Regolo
+ 
+ - **Env var**: `REGOLO_API_KEY`
+ - **API**: `https://api.regolo.ai/v1`
+ - **Features**: EU-hosted open-weight models with tool calling. The catalogue and prices are listed live from the API
+ 
+ | Tier | Models | Pricing (in/out per 1M tokens) | Context |
+ |------|--------|-------------------------------|---------|
+ | Weak | **qwen3.5-9b** (default) | $0.07 / $0.35 | 80K ctx / 80K out |
+ | Medium | **qwen3-coder-next** (default) | $0.50 / $2.00 | 120K ctx / 120K out |
+ | Strong | **qwen3.5-122b** (default) | $1.00 / $4.20 | 120K ctx / 120K out |
+ 
+ Defaults: qwen3.5-122b (strong), qwen3-coder-next (medium), qwen3.5-9b (weak)
+ 
+ ### TensorX
+ 
+ - **Env var**: `TENSORX_API_KEY`
+ - **API**: `https://api.tensorx.ai/v1`
+ - **Features**: Open-weight models, zero data retention, prompt caching
+ 
+ No hardcoded model catalog. Use any model ID supported by this provider.
+ 
 ### Opencode Zen
 
 - **Env var**: `OPENCODE_API_KEY`
@@ -432,6 +500,7 @@ supports_vision = false
 | `supports_deferred_tools` | bool | The endpoint can load a deferred MCP tool without rewriting the cached tools prefix (see [MCP](../mcp/#loads-and-the-prompt-cache)). True for Anthropic direct and Bedrock. A custom `protocol = "anthropic"` provider, or a built-in pointed at another `base_url`, defaults to false and opts in here |
 | `models` | array | Declared models for custom providers (see below) |
 | `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
+| `extra_body` | table | OpenAI-compat providers. JSON fields merged into every request body, overriding fields maki computes (e.g. `preset = "my-slug"` for an OpenRouter preset) |
 
 ### Model fields
 

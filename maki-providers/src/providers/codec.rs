@@ -512,6 +512,7 @@ impl Provider for CompatProvider {
                 if let Some(hook) = &self.build_body {
                     body = hook.call(body, &ctx).await?;
                 }
+                body = self.compat.wire_body(&body);
                 return responses::do_stream(
                     self.compat.client(),
                     model,
