@@ -1,10 +1,14 @@
 # To release:
 #   git tag vX.Y.Z
 #   git push origin vX.Y.Z
+# Pushes to the megamerge branch automatically update the
+# single rolling release tagged "megamerge" (draft -> published).
 name: Release
 
 on:
   push:
+    branches:
+      - megamerge
     tags:
       - "v*"
 
@@ -23,18 +27,44 @@ jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      version: ${{ steps.vars.outputs.version }}
+      title: ${{ steps.vars.outputs.title }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Determine tag and version
+        id: vars
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "title=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            short="$(git rev-parse --short "$GITHUB_SHA")"
+            change_id="$(git cat-file commit "$GITHUB_SHA" | grep -m1 '^change-id ' | cut -d' ' -f2 | cut -c1-6)"
+            change_id="${change_id:-nochangeid}"
+            echo "tag=megamerge" >> "$GITHUB_OUTPUT"
+            echo "version=megamerge-${short}-${change_id}" >> "$GITHUB_OUTPUT"
+            echo "title=megamerge (${short}, ${change_id})" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create draft release
+        env:
+          RELEASE_TAG: ${{ steps.vars.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.vars.outputs.title }}
         run: |
           .github/scripts/retry.sh bash -c \
-            'gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --generate-notes'
+            'gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" --title "$RELEASE_TITLE"'
 
   build-linux:
     name: Build (${{ matrix.target }})
     needs: create-release
     runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,27 +95,25 @@ jobs:
 
       - name: Package
         run: |
-          tag="$GITHUB_REF_NAME"
-          archive="${BINARY_NAME}-${tag}-${{ matrix.target }}.tar.gz"
+          archive="${BINARY_NAME}-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz"
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "${BINARY_NAME}"
           tar czf "${archive}" "${BINARY_NAME}"
           echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        run: .github/scripts/retry.sh gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
+        run: .github/scripts/retry.sh gh release upload "$RELEASE_TAG" "$ARCHIVE" --clobber
 
-  build-other:
+  build-windows:
     name: Build (${{ matrix.target }})
     needs: create-release
     runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - target: aarch64-apple-darwin
-            runner: macos-14
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
 
@@ -102,38 +130,38 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          tag="$GITHUB_REF_NAME"
-          archive="${BINARY_NAME}-${tag}-${{ matrix.target }}.tar.gz"
-          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "${BINARY_NAME}"
-          tar czf "${archive}" "${BINARY_NAME}"
-          echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
-
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          tag="$GITHUB_REF_NAME"
-          archive="${BINARY_NAME}-${tag}-${{ matrix.target }}.zip"
+          archive="${BINARY_NAME}-${RELEASE_VERSION}-${{ matrix.target }}.zip"
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}.exe" "${BINARY_NAME}.exe"
           7z a "${archive}" "${BINARY_NAME}.exe"
           echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         shell: bash
-        run: .github/scripts/retry.sh gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
+        run: .github/scripts/retry.sh gh release upload "$RELEASE_TAG" "$ARCHIVE" --clobber
 
   publish:
     name: Publish Release
-    needs: [build-linux, build-other]
+    needs: [create-release, build-linux, build-windows]
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Remove stale assets (megamerge only)
+        if: startsWith(github.ref, 'refs/heads/')
+        run: |
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while read -r asset; do
+            [ -n "$asset" ] && gh release delete-asset "$RELEASE_TAG" "$asset" --yes || true
+          done
+
       - name: Download artifacts
-        run: .github/scripts/retry.sh gh release download "$GITHUB_REF_NAME" --dir artifacts
+        run: .github/scripts/retry.sh gh release download "$RELEASE_TAG" --dir artifacts
 
       - name: Generate checksums
         run: |
@@ -142,7 +170,7 @@ jobs:
           cat ../sha256sums.txt
 
       - name: Upload checksums
-        run: .github/scripts/retry.sh gh release upload "$GITHUB_REF_NAME" sha256sums.txt --clobber
+        run: .github/scripts/retry.sh gh release upload "$RELEASE_TAG" sha256sums.txt --clobber
 
       - name: Mark release as published
-        run: .github/scripts/retry.sh gh release edit "$GITHUB_REF_NAME" --draft=false
+        run: .github/scripts/retry.sh gh release edit "$RELEASE_TAG" --draft=false
