@@ -423,6 +423,19 @@ mod tests {
         assert_eq!(urlenc(input), expected);
     }
 
+    #[test]
+    fn ignored_builtin_fields_keeps_extra_body_for_openai_compat_builtins() {
+        let def = maki_config::providers::ProviderDef {
+            extra_body: Some(Default::default()),
+            ..Default::default()
+        };
+        assert!(maki_config::providers::ignored_builtin_fields("openrouter", &def).is_empty());
+        assert_eq!(
+            maki_config::providers::ignored_builtin_fields("anthropic", &def),
+            ["extra_body"]
+        );
+    }
+
     struct NeverReader;
 
     impl futures_lite::io::AsyncRead for NeverReader {
