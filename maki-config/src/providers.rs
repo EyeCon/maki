@@ -210,6 +210,11 @@ pub struct ProviderDef {
     pub overrides: HashMap<String, ProviderOverride>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelDef>,
+    /// Extra top-level JSON fields merged into every inference request body
+    /// (openai-compat providers only; e.g. `preset = "my-slug"` for
+    /// OpenRouter). Configured values win over fields maki computes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -374,6 +379,14 @@ pub fn ignored_builtin_fields(slug: &str, def: &ProviderDef) -> Vec<&'static str
     if def.enable_free_models.is_some() && slug != OPENCODE_SLUG {
         ignored.push("enable_free_models");
     }
+    if def.extra_body.is_some()
+        && !matches!(
+            builtin_provider(slug).map(|b| b.protocol),
+            Some(Protocol::Openai | Protocol::OpenaiResponses)
+        )
+    {
+        ignored.push("extra_body");
+    }
     ignored
 }
 
@@ -491,6 +504,29 @@ mod tests {
     fn provider_def_enable_free_models_defaults_none() {
         let def: ProviderDef = toml::from_str(EMPTY_PROVIDER_DEF_TOML).unwrap();
         assert_eq!(def.enable_free_models, None);
+    }
+
+    const EXTRA_BODY_DEF_TOML: &str = r#"
+protocol = "openai"
+[extra_body]
+preset = "email-copywriter"
+temperature = 0.5
+route_nested = { sort = "price" }
+"#;
+
+    #[test]
+    fn provider_def_extra_body_parses_json_values() {
+        let def: ProviderDef = toml::from_str(EXTRA_BODY_DEF_TOML).unwrap();
+        let extra = def.extra_body.unwrap();
+        assert_eq!(extra["preset"], serde_json::json!("email-copywriter"));
+        assert_eq!(extra["temperature"], serde_json::json!(0.5));
+        assert_eq!(extra["route_nested"], serde_json::json!({"sort": "price"}));
+    }
+
+    #[test]
+    fn provider_def_extra_body_defaults_none() {
+        let def: ProviderDef = toml::from_str(EMPTY_PROVIDER_DEF_TOML).unwrap();
+        assert_eq!(def.extra_body, None);
     }
 
     const UNKNOWN_TIER_TOML: &str = r#"id = "x"
@@ -617,6 +653,16 @@ tier = "{input}"
             ignored_builtin_fields("openrouter", &def),
             ["enable_free_models"]
         );
+    }
+
+    #[test]
+    fn ignored_builtin_fields_flags_extra_body_for_non_openai_protocols() {
+        let def = ProviderDef {
+            extra_body: Some(Default::default()),
+            ..Default::default()
+        };
+        assert_eq!(ignored_builtin_fields("anthropic", &def), ["extra_body"]);
+        assert_eq!(ignored_builtin_fields("google", &def), ["extra_body"]);
     }
 
     #[test_case("MyProvider", "myprovider"; "mixed_case")]

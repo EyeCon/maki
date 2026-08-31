@@ -226,7 +226,7 @@ Defaults: deepseek-v4-flash (medium), deepseek-v4-pro (strong)
 - **API**: `https://openrouter.ai/api/v1`
 - **Features**: 300+ models from all providers, prompt caching, provider routing
 
-OpenRouter aggregates models from many providers behind a single API key. Browse available models at [openrouter.ai/models](https://openrouter.ai/models). Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`).
+OpenRouter aggregates models from many providers behind a single API key. Browse available models at [openrouter.ai/models](https://openrouter.ai/models). Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`), including preset references (e.g. `openrouter/@preset/my-slug`). Set `extra_body.preset` under `[openrouter]` in providers.toml to attach a preset while keeping an explicit model.
 
 ### Synthetic
 
@@ -385,6 +385,7 @@ supports_vision = false
 | `enable_free_models` | bool | Opencode only. Show free catalog models (default false) |
 | `models` | array | Declared models for custom providers (see below) |
 | `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
+| `extra_body` | table | OpenAI-compat providers. JSON fields merged into every request body, overriding fields maki computes (e.g. `preset = "my-slug"` for an OpenRouter preset) |
 
 ### Model fields
 

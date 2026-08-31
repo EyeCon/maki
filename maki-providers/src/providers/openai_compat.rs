@@ -5,6 +5,7 @@ use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
 use super::ResolvedAuth;
@@ -36,21 +37,51 @@ pub(crate) struct OpenAiCompatProvider {
     /// bare ollama host). Request-time `auth.base_url` still wins (custom,
     /// local, dynamic).
     resolved_base_url: Option<String>,
+    /// `providers.toml` `extra_body` fields merged into every inference body
+    /// just before it is serialized; configured values win over fields maki
+    /// computes.
+    extra_body: Option<BTreeMap<String, Value>>,
 }
 
 impl OpenAiCompatProvider {
     pub fn new(config: &'static OpenAiCompatConfig, timeouts: super::Timeouts) -> Self {
-        let resolved_base_url = if config.slug.is_empty() {
-            None
-        } else {
-            let providers = maki_config::providers::ProvidersConfig::load();
+        let providers =
+            (!config.slug.is_empty()).then(maki_config::providers::ProvidersConfig::load);
+        let resolved_base_url = providers.as_ref().and_then(|providers| {
             maki_config::providers::configured_base_url(config.slug, providers.get(config.slug))
-        };
+        });
+        let extra_body = providers
+            .as_ref()
+            .and_then(|providers| providers.get(config.slug))
+            .and_then(|def| def.extra_body.clone());
         Self {
             client: super::http_client(timeouts),
             config,
             stream_timeout: timeouts.stream,
             resolved_base_url,
+            extra_body,
+        }
+    }
+
+    /// Override the auto-resolved `extra_body` (custom providers resolve their
+    /// own definition since their compat config slug is empty).
+    pub(crate) fn with_extra_body(mut self, extra_body: Option<BTreeMap<String, Value>>) -> Self {
+        self.extra_body = extra_body;
+        self
+    }
+
+    /// The body sent on the wire: the provider-built body with `extra_body`
+    /// fields applied last so configured values win over fields maki computes.
+    pub(crate) fn wire_body(&self, body: &Value) -> Value {
+        match &self.extra_body {
+            None => body.clone(),
+            Some(extra) => {
+                let mut merged = body.clone();
+                for (key, value) in extra {
+                    merged[key.as_str()] = value.clone();
+                }
+                merged
+            }
         }
     }
 
@@ -172,7 +203,7 @@ impl OpenAiCompatProvider {
         event_tx: &Sender<ProviderEvent>,
         auth: &ResolvedAuth,
     ) -> Result<StreamResponse, AgentError> {
-        let json_body = serde_json::to_vec(body)?;
+        let json_body = serde_json::to_vec(&self.wire_body(body))?;
         let mut request = self
             .build_request("POST", "/chat/completions", auth)
             .header("content-type", "application/json");
@@ -1269,5 +1300,53 @@ data: [DONE]\n";
             assert_eq!(text_deltas, vec!["Hello"]);
             assert_eq!(thinking_deltas, vec!["Let me think", "..."]);
         })
+    }
+
+    static TEST_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+        slug: "test",
+        api_key_env: "",
+        base_url: "http://localhost:1",
+        max_tokens_field: "max_tokens",
+        include_stream_usage: true,
+        provider_name: "test",
+    };
+
+    fn compat_with_extra(extra: Option<BTreeMap<String, Value>>) -> OpenAiCompatProvider {
+        OpenAiCompatProvider {
+            client: HttpClient::new().unwrap(),
+            config: &TEST_CONFIG,
+            stream_timeout: TEST_STREAM_TIMEOUT,
+            resolved_base_url: None,
+            extra_body: extra,
+        }
+    }
+
+    fn extra_body(pairs: &[(&str, Value)]) -> Option<BTreeMap<String, Value>> {
+        Some(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn wire_body_without_extra_body_passes_body_through() {
+        let compat = compat_with_extra(None);
+        let body = json!({"model": "m", "messages": []});
+        assert_eq!(compat.wire_body(&body), body);
+    }
+
+    #[test]
+    fn wire_body_merges_extra_fields_over_computed() {
+        let compat = compat_with_extra(extra_body(&[
+            ("preset", json!("email-copywriter")),
+            ("model", json!("override")),
+        ]));
+        let merged = compat.wire_body(&json!({"model": "m", "stream": true}));
+        assert_eq!(
+            merged,
+            json!({"model": "override", "stream": true, "preset": "email-copywriter"})
+        );
     }
 }
