@@ -1,10 +1,14 @@
 # To release:
 #   git tag vX.Y.Z
 #   git push origin vX.Y.Z
+# Pushes to the megamerge branch automatically update the
+# single rolling release tagged "megamerge" (draft -> published).
 name: Release
 
 on:
   push:
+    branches:
+      - megamerge
     tags:
       - "v*"
 
@@ -19,22 +23,64 @@ env:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      version: ${{ steps.vars.outputs.version }}
+      title: ${{ steps.vars.outputs.title }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Determine tag and version
+        id: vars
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "title=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            short="$(git rev-parse --short "$GITHUB_SHA")"
+            change_id="$(git cat-file commit "$GITHUB_SHA" | grep -m1 '^change-id ' | cut -d' ' -f2 | cut -c1-7)"
+            change_id="${change_id:-nochangeid}"
+            echo "tag=megamerge" >> "$GITHUB_OUTPUT"
+            echo "version=megamerge-${short}-${change_id}" >> "$GITHUB_OUTPUT"
+            echo "title=megamerge (${short}, ${change_id})" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create draft release
+        env:
+          RELEASE_TAG: ${{ steps.vars.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.vars.outputs.title }}
         run: |
-          .github/scripts/retry.sh bash -c \
-            'gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --generate-notes'
+          if .github/scripts/retry.sh gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            .github/scripts/retry.sh gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --draft
+          else
+            .github/scripts/retry.sh gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" --title "$RELEASE_TITLE"
+          fi
+
+      - name: Remove stale assets (megamerge only)
+        if: startsWith(github.ref, 'refs/heads/')
+        env:
+          RELEASE_TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while read -r asset; do
+            [ -n "$asset" ] && gh release delete-asset "$RELEASE_TAG" "$asset" --yes || true
+          done
 
   build-linux:
     name: Build (${{ matrix.target }})
     needs: create-release
     runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,52 +91,61 @@ jobs:
             runner: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Restore cargo/rustup cache
+        uses: actions/cache@v5
+        with:
+          path: .cargo-cache
+          key: alpine-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: alpine-${{ matrix.target }}-
 
       - name: Build in Alpine container
         run: |
+          mkdir -p .cargo-cache/cargo .cargo-cache/rustup .cargo-cache/target
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
+            -e CARGO_HOME=/workspace/.cargo-cache/cargo \
+            -e RUSTUP_HOME=/workspace/.cargo-cache/rustup \
+            -e CARGO_TARGET_DIR=/workspace/.cargo-cache/target \
             -e CARGO_TERM_COLOR=always \
             -e CARGO_INCREMENTAL=0 \
             alpine:3.21 sh -c '
               apk add --no-cache gcc g++ musl-dev make perl linux-headers curl git ca-certificates pkgconf python3-dev
               git config --global --add safe.directory /workspace
               curl --proto "=https" --tlsv1.2 --retry 5 --retry-delay 2 --retry-all-errors -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --target ${{ matrix.target }}
-              source "$HOME/.cargo/env"
+              source "$CARGO_HOME/env"
               cargo build --release --target ${{ matrix.target }}
             '
-          sudo chown -R $(id -u):$(id -g) target/
+          sudo chown -R $(id -u):$(id -g) .cargo-cache
 
       - name: Package
         run: |
-          tag="$GITHUB_REF_NAME"
-          archive="${BINARY_NAME}-${tag}-${{ matrix.target }}.tar.gz"
-          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "${BINARY_NAME}"
+          archive="${BINARY_NAME}-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz"
+          cp ".cargo-cache/target/${{ matrix.target }}/release/${BINARY_NAME}" "${BINARY_NAME}"
           tar czf "${archive}" "${BINARY_NAME}"
           echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        run: .github/scripts/retry.sh gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
+        run: .github/scripts/retry.sh gh release upload "$RELEASE_TAG" "$ARCHIVE" --clobber
 
-  build-other:
+  build-windows:
     name: Build (${{ matrix.target }})
     needs: create-release
     runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - target: aarch64-apple-darwin
-            runner: macos-14
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         run: rustup target add ${{ matrix.target }}
@@ -102,47 +157,27 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          tag="$GITHUB_REF_NAME"
-          archive="${BINARY_NAME}-${tag}-${{ matrix.target }}.tar.gz"
-          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "${BINARY_NAME}"
-          tar czf "${archive}" "${BINARY_NAME}"
-          echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
-
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          tag="$GITHUB_REF_NAME"
-          archive="${BINARY_NAME}-${tag}-${{ matrix.target }}.zip"
+          archive="${BINARY_NAME}-${RELEASE_VERSION}-${{ matrix.target }}.zip"
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}.exe" "${BINARY_NAME}.exe"
           7z a "${archive}" "${BINARY_NAME}.exe"
           echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         shell: bash
-        run: .github/scripts/retry.sh gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
+        run: .github/scripts/retry.sh gh release upload "$RELEASE_TAG" "$ARCHIVE" --clobber
 
   publish:
     name: Publish Release
-    needs: [build-linux, build-other]
+    needs: [create-release, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download artifacts
-        run: .github/scripts/retry.sh gh release download "$GITHUB_REF_NAME" --dir artifacts
-
-      - name: Generate checksums
-        run: |
-          cd artifacts
-          sha256sum * > ../sha256sums.txt
-          cat ../sha256sums.txt
-
-      - name: Upload checksums
-        run: .github/scripts/retry.sh gh release upload "$GITHUB_REF_NAME" sha256sums.txt --clobber
+      - uses: actions/checkout@v5
 
       - name: Mark release as published
-        run: .github/scripts/retry.sh gh release edit "$GITHUB_REF_NAME" --draft=false
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+        run: .github/scripts/retry.sh gh release edit "$RELEASE_TAG" --draft=false

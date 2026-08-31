@@ -11,7 +11,7 @@ Install Maki, connect a provider, run a first session. A few minutes, start to f
 
 ## Install
 
-### Linux / macOS
+### Linux
 
 ```sh
 # Download and read the script first (don't blindly trust shell scripts).
@@ -55,18 +55,16 @@ curl -fsSL https://maki.sh/install.sh | sh
 
 Both install to `%LOCALAPPDATA%\maki` and add it to your user PATH. Override with `MAKI_INSTALL_DIR` / `$env:MAKI_INSTALL_DIR`.
 
-```sh
-cargo install --locked --git https://github.com/tontinton/maki.git maki
-```
-Both install to `%LOCALAPPDATA%\maki` and add it to your user PATH. Override with `MAKI_INSTALL_DIR` / `$env:MAKI_INSTALL_DIR`.
-
 ### Living on the edge (main branch)
 
 ```sh
+cargo install --locked --git https://github.com/tontinton/maki.git maki
+```
+
+Or download a pre-built binary from [GitHub Releases](https://github.com/tontinton/maki/releases/latest).
 
 ## Connect a provider
 
-```bash
 ```bash
 maki auth login              # interactive picker (OAuth or API key)
 export ANTHROPIC_API_KEY=... # or just export a key
@@ -86,6 +84,12 @@ Type what you want done, press Enter, watch it work. Worth knowing on day one:
 
 - **Permissions.** File edits inside the repo run freely. `bash` and web tools ask first: `y` allows once, `s` for the session, `a` for the project. Deny rules always win; `/yolo` skips the prompts. Details in [Permissions](/docs/permissions/).
 - **Plan mode.** `Tab` toggles it. The agent may only write the plan file until you approve, then back to build mode.
+- **Models.** `/model` switches mid-session.
+- **Sessions.** `/new` starts a second session while the first keeps working in the background; `/sessions` jumps between them. Tomorrow, `maki --continue` resumes where you left off.
+- **Your shell.** Prefix input with `!` to run a command yourself (`!cargo test`). `!!` hides command and output from the agent.
+- **Escape hatch.** `Esc Esc` cancels a streaming response. When idle, it rewinds instead.
+- **Help.** `Ctrl+H` lists every keybinding, or see [Keybindings](/docs/keybindings/).
+## First session
 - **Models.** `/model` switches mid-session.
 - **Sessions.** `/new` starts a second session while the first keeps working in the background; `/sessions` jumps between them. Tomorrow, `maki --continue` resumes where you left off.
 - **Your shell.** Prefix input with `!` to run a command yourself (`!cargo test`). `!!` hides command and output from the agent.
