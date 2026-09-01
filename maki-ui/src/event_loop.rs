@@ -40,6 +40,7 @@ use maki_storage::StateDir;
 use maki_storage::StorageError;
 use maki_storage::id::{MakiId, MakiIdParseError, SessionRef};
 use maki_storage::sessions::{SessionError, normalize_title};
+use ratatui::backend::Backend;
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -679,6 +680,31 @@ impl<'t> EventLoop<'t> {
         &mut self.sessions[self.focused].app
     }
 
+    /// Paints a frame and parks the terminal cursor on the cell the input box
+    /// reversed, without showing it. macOS anchors IME preedit text to the
+    /// cursor, so it has to sit there, but a visible one would invert that
+    /// already reversed cell back to plain text and ride along with every cell
+    /// the next diff writes.
+    ///
+    /// `Frame::set_cursor_position` cannot do this: ratatui shows the cursor
+    /// whenever a frame asks for a position. Hence the move after the draw,
+    /// and the hide that goes with it, so a widget that does ask for one
+    /// cannot bring the block cursor back.
+    fn paint(&mut self) -> Result<()> {
+        let app = &mut self.sessions[self.focused].app;
+        let mut cursor = None;
+        self.terminal.draw(|f| {
+            cursor = app.view(f);
+            color_compat::downgrade_if_needed(f.buffer_mut());
+        })?;
+        if let Some(pos) = cursor {
+            self.terminal.hide_cursor()?;
+            self.terminal.set_cursor_position(pos)?;
+            self.terminal.backend_mut().flush()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn run(mut self, initial_prompt: Option<String>) -> Result<ShutdownReport> {
         if let Some(prompt) = initial_prompt {
             let sub = Submission {
@@ -698,14 +724,10 @@ impl<'t> EventLoop<'t> {
                 Err(e) => break Err(e),
             }
             self.checkpoint_all();
-            if dirty.take() {
-                let app = &mut self.sessions[self.focused].app;
-                if let Err(e) = self.terminal.draw(|f| {
-                    app.view(f);
-                    color_compat::downgrade_if_needed(f.buffer_mut());
-                }) {
-                    break Err(e.into());
-                }
+            if dirty.take()
+                && let Err(e) = self.paint()
+            {
+                break Err(e);
             }
 
             if let Some(i) = self.sessions.iter().position(|rt| {

@@ -12,7 +12,7 @@ use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
 use maki_lua::Split;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Widget};
 
@@ -38,19 +38,21 @@ impl App {
         self.prompt_open() || self.plan_form_active()
     }
 
-    pub fn view(&mut self, frame: &mut Frame) {
+    /// Returns the cell the input box reversed for its cursor, if any.
+    pub fn view(&mut self, frame: &mut Frame) -> Option<Position> {
         let layout = self.compute_layout(frame.area());
         let render_chat = self.active_chat;
 
         self.render_background(frame);
         self.render_messages(frame, &layout, render_chat);
-        self.render_bottom_panel(frame, &layout);
+        let cursor = self.render_bottom_panel(frame, &layout);
         self.render_splits(frame, &layout);
         let mut overlay_rect = self.render_picker_overlays(frame, &layout);
         self.render_status_bar(frame, layout.status_area, render_chat);
         overlay_rect = self.render_top_modals(frame, overlay_rect);
         self.register_zones(&layout, overlay_rect);
         self.apply_selection(frame, render_chat);
+        cursor
     }
 
     fn compute_layout(&self, area: Rect) -> ViewLayout {
@@ -149,7 +151,7 @@ impl App {
         self.chats[render_chat].view(frame, layout.msg_area, self.selection_state.is_some());
     }
 
-    fn render_bottom_panel(&mut self, frame: &mut Frame, layout: &ViewLayout) {
+    fn render_bottom_panel(&mut self, frame: &mut Frame, layout: &ViewLayout) -> Option<Position> {
         if self.permission_prompt.is_open() {
             self.permission_prompt.view(frame, layout.bottom_area);
         } else if self.pack_review.is_open() {
@@ -202,7 +204,7 @@ impl App {
                 .then(|| self.plan_form.hint_line())
                 .flatten()
                 .or_else(|| self.lua_hint_line());
-            self.input_box.view(
+            let cursor = self.input_box.view(
                 frame,
                 layout.input_area,
                 placeholder,
@@ -211,7 +213,9 @@ impl App {
                 panel_hint,
             );
             self.command_palette.view(frame, layout.input_area);
+            return cursor;
         }
+        None
     }
 
     fn render_splits(&mut self, frame: &mut Frame, layout: &ViewLayout) {
