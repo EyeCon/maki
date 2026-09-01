@@ -9,35 +9,17 @@ use tracing::info;
 use super::history::{History, remove_orphaned_tool_results};
 use super::streaming::{StreamError, stream_with_retry};
 use crate::cancel::CancelToken;
-use crate::prompt::COMPACTION_USER;
 use crate::{AgentError, AgentEvent, DoneReason, EventSender, TurnCompleteEvent};
 
 const CONTINUE_AFTER_COMPACT: &str = "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed. If the summary contains a todo list, restore it with todo_write and keep it updated. If you learned important project context during this session, consider saving it to memory before it's lost.";
 const IMAGE_PLACEHOLDER: &str = "[image]";
 
-fn normalize(text: Option<&str>) -> Option<&str> {
-    text.map(str::trim).filter(|t| !t.is_empty())
-}
-
-/// Config instructions steer every compaction, `request` only the one the user
-/// asked for with `/compact <guidance>`, so both are kept and neither wins.
-fn summary_prompt(config: &AgentConfig, request: Option<&str>) -> String {
-    let extras = [
-        normalize(config.compaction_instructions.as_deref()),
-        normalize(request),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("\n");
-    if extras.is_empty() {
-        return COMPACTION_USER.to_string();
-    }
-    format!("{COMPACTION_USER}\n\nAdditional instructions:\n{extras}")
+fn normalize(text: &Option<String>) -> Option<&str> {
+    text.as_deref().map(str::trim).filter(|t| !t.is_empty())
 }
 
 pub(super) fn continue_message(config: &AgentConfig) -> String {
-    match normalize(config.post_compaction_instructions.as_deref()) {
+    match normalize(&config.post_compaction_instructions) {
         Some(extra) => format!("{CONTINUE_AFTER_COMPACT}\n\n{extra}"),
         None => CONTINUE_AFTER_COMPACT.to_string(),
     }
@@ -50,7 +32,6 @@ pub(super) async fn compact_history(
     event_tx: &EventSender,
     cancel: &CancelToken,
     config: &AgentConfig,
-    instructions: Option<&str>,
 ) -> Result<TokenUsage, AgentError> {
     let compact_start = std::time::Instant::now();
     let mut compaction_history: Vec<Message> = history.as_slice().to_vec();
@@ -58,7 +39,14 @@ pub(super) async fn compact_history(
     strip_images(&mut compaction_history);
     strip_thinking(&mut compaction_history);
     strip_old_tool_results(&mut compaction_history);
-    compaction_history.push(Message::user(summary_prompt(config, instructions)));
+    let summary_prompt = match normalize(&config.compaction_instructions) {
+        Some(extra) => format!(
+            "{}\n\nAdditional instructions:\n{extra}",
+            crate::prompt::COMPACTION_USER
+        ),
+        None => crate::prompt::COMPACTION_USER.to_string(),
+    };
+    compaction_history.push(Message::user(summary_prompt));
 
     let empty_tools = serde_json::json!([]);
     let max_attempts = 3;
@@ -140,20 +128,10 @@ pub async fn compact(
     history: &mut History,
     event_tx: &EventSender,
     config: &AgentConfig,
-    instructions: Option<&str>,
 ) -> Result<(), AgentError> {
     let cancel = CancelToken::none();
-    let usage = compact_history(
-        provider,
-        model,
-        history,
-        event_tx,
-        &cancel,
-        config,
-        instructions,
-    )
-    .await?;
-    if let Some(post) = normalize(config.post_compaction_instructions.as_deref()) {
+    let usage = compact_history(provider, model, history, event_tx, &cancel, config).await?;
+    if let Some(post) = normalize(&config.post_compaction_instructions) {
         history.push(Message::synthetic(post.to_string()));
     }
 
@@ -281,10 +259,6 @@ mod tests {
     use super::*;
     use crate::AgentConfig;
 
-    const CONFIG_EXTRA: &str = "Record anything that belongs in plan.md";
-    const REQUEST_EXTRA: &str = "Keep the failing test names";
-    const POST: &str = "Re-read plan.md and agent.md";
-
     struct MockProvider {
         responses: Mutex<Vec<Result<StreamResponse, AgentError>>>,
         requests: Mutex<Vec<Vec<Message>>>,
@@ -372,7 +346,6 @@ mod tests {
                 &mut history,
                 &EventSender::new(raw_tx, 0),
                 &AgentConfig::default(),
-                None,
             )
             .await
             .unwrap();
@@ -407,7 +380,6 @@ mod tests {
                 &mut history,
                 &EventSender::new(raw_tx, 0),
                 &AgentConfig::default(),
-                None,
             )
             .await
             .expect_err("empty summary must fail");
@@ -418,16 +390,17 @@ mod tests {
         });
     }
 
-    /// `summary_prompt_merges_instructions` covers the merge, this one the
-    /// wiring around it.
     #[test]
-    fn compact_sends_instructions_and_appends_post() {
+    fn compact_applies_custom_instructions() {
         smol::block_on(async {
+            const EXTRA: &str = "Record anything that belongs in plan.md";
+            const POST: &str = "Re-read plan.md and agent.md";
+
             let provider = MockProvider::new(vec![Ok(text_response(StopReason::EndTurn))]);
             let mut history = History::new(vec![Message::user("work".into())]);
             let (raw_tx, _rx) = flume::unbounded();
             let config = AgentConfig {
-                compaction_instructions: Some(CONFIG_EXTRA.into()),
+                compaction_instructions: Some(EXTRA.into()),
                 post_compaction_instructions: Some(POST.into()),
                 ..Default::default()
             };
@@ -438,16 +411,16 @@ mod tests {
                 &mut history,
                 &EventSender::new(raw_tx, 0),
                 &config,
-                Some(REQUEST_EXTRA),
             )
             .await
             .unwrap();
 
             let requests = provider.requests.lock().unwrap();
+            let summary_prompt = requests[0].last().unwrap();
             assert!(matches!(
-                &requests[0].last().unwrap().content[0],
+                &summary_prompt.content[0],
                 ContentBlock::Text { text }
-                    if text.contains(CONFIG_EXTRA) && text.contains(REQUEST_EXTRA)
+                    if text.starts_with(crate::prompt::COMPACTION_USER) && text.ends_with(EXTRA)
             ));
             assert!(matches!(
                 &history.as_slice().last().unwrap().content[0],
@@ -456,31 +429,10 @@ mod tests {
         });
     }
 
-    #[test_case(None, None, false, false ; "no_instructions")]
-    #[test_case(Some(CONFIG_EXTRA), None, true, false ; "config_only")]
-    #[test_case(None, Some(REQUEST_EXTRA), false, true ; "request_only")]
-    #[test_case(Some(CONFIG_EXTRA), Some(REQUEST_EXTRA), true, true ; "both_kept")]
-    #[test_case(Some(CONFIG_EXTRA), Some("   "), true, false ; "blank_request_ignored")]
-    #[test_case(Some(" \n "), Some(REQUEST_EXTRA), false, true ; "blank_config_ignored")]
-    fn summary_prompt_merges_instructions(
-        config_extra: Option<&str>,
-        request: Option<&str>,
-        has_config: bool,
-        has_request: bool,
-    ) {
-        let config = AgentConfig {
-            compaction_instructions: config_extra.map(str::to_string),
-            ..Default::default()
-        };
-        let prompt = summary_prompt(&config, request);
-
-        assert!(prompt.starts_with(COMPACTION_USER));
-        assert_eq!(
-            prompt.len() > COMPACTION_USER.len(),
-            has_config || has_request
-        );
-        assert_eq!(prompt.contains(CONFIG_EXTRA), has_config);
-        assert_eq!(prompt.contains(REQUEST_EXTRA), has_request);
+    #[test_case(Some("  \n ".into()), None ; "whitespace_only_is_none")]
+    #[test_case(Some("  keep plan.md ".into()), Some("keep plan.md") ; "trimmed")]
+    fn normalize_instructions(raw: Option<String>, expected: Option<&str>) {
+        assert_eq!(normalize(&raw), expected);
     }
 
     #[test]
@@ -517,7 +469,6 @@ mod tests {
                 &EventSender::new(raw_tx, 0),
                 &CancelToken::none(),
                 &AgentConfig::default(),
-                None,
             )
             .await
             .unwrap();
@@ -746,7 +697,6 @@ mod tests {
                 &EventSender::new(raw_tx, 0),
                 &CancelToken::none(),
                 &AgentConfig::default(),
-                None,
             )
             .await
             .unwrap();
@@ -789,7 +739,6 @@ mod tests {
                 &EventSender::new(raw_tx, 0),
                 &CancelToken::none(),
                 &AgentConfig::default(),
-                None,
             )
             .await
             .unwrap();

@@ -20,7 +20,7 @@
 
 ## Color
 
-"Warm surfaces, cool ink." Two neutrals + one accent, oklch, defined once in `base.html` `:root` / `[data-theme="dark"]`; components only use vars. A stored choice wins, otherwise `prefers-color-scheme` decides; the head script resolves both before the first paint. The landing page runs the identical rule on the same `localStorage.theme` key, so the two never disagree.
+"Warm surfaces, cool ink." Two neutrals + one accent, oklch, defined once in `base.html` `:root` / `[data-theme="dark"]`; components only use vars. Dark is the default: the head script applies light only when `localStorage.theme` says so, and `prefers-color-scheme` is ignored so the docs and the landing page never disagree.
 
 | | Light | Dark |
 |---|---|---|

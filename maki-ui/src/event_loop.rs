@@ -47,7 +47,7 @@ use tracing::{info, warn};
 use crate::AppSession;
 use crate::agent::{
     AgentCommand, AgentHandles, ModelSlot,
-    shared_queue::{Compaction, QueueItem, QueuedInput},
+    shared_queue::{QueueItem, QueuedInput},
 };
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::tasks::{TaskStatus, diff_task_states};
@@ -589,7 +589,7 @@ impl<'t> EventLoop<'t> {
 
         static PROCESS_WARMUP: std::sync::Once = std::sync::Once::new();
         PROCESS_WARMUP.call_once(|| {
-            maki_highlight::pool::spawn(crate::highlight::warmup);
+            std::thread::spawn(crate::highlight::warmup);
             crate::update::spawn_check();
         });
 
@@ -1529,14 +1529,11 @@ impl<'t> EventLoop<'t> {
             Action::UnassignTier(spec, tier) => {
                 maki_providers::model_registry::unset_and_persist(&spec, tier, &self.ctx.storage);
             }
-            Action::Compact(instructions) => {
+            Action::Compact => {
                 let rt = &mut self.sessions[idx];
                 rt.reset_run_notifications();
                 let run_id = rt.app.run_id;
-                rt.handles.queue.push(QueueItem::Compact(Compaction {
-                    run_id,
-                    instructions,
-                }));
+                rt.handles.queue.push(QueueItem::Compact { run_id });
             }
             Action::ToggleMcp(server_name, enabled) => {
                 self.sessions[idx].handles.send_mcp(McpCommand::Toggle {

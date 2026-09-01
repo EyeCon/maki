@@ -126,10 +126,7 @@ impl AgentLoop {
         let event_tx = EventSender::new(self.agent_tx.clone(), run_id);
 
         let result = match run {
-            QueueRun::Compact(compaction) => {
-                self.do_compact(&event_tx, compaction.instructions.as_deref())
-                    .await
-            }
+            QueueRun::Compact { .. } => self.do_compact(&event_tx).await,
             QueueRun::Messages(messages) => {
                 let inputs = messages
                     .into_iter()
@@ -176,11 +173,7 @@ impl AgentLoop {
         !self.init_cancel.is_cancelled()
     }
 
-    async fn do_compact(
-        &mut self,
-        event_tx: &EventSender,
-        instructions: Option<&str>,
-    ) -> Result<(), AgentError> {
+    async fn do_compact(&mut self, event_tx: &EventSender) -> Result<(), AgentError> {
         let slot = self.model_slot.load();
         let (provider, model) = agent::resolve_compaction_model(
             &slot.provider,
@@ -194,7 +187,6 @@ impl AgentLoop {
             &mut self.history,
             event_tx,
             &self.config,
-            instructions,
         )
         .await
     }

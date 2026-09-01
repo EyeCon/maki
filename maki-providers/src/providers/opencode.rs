@@ -1,57 +1,61 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use flume::Sender;
+use isahc::{HttpClient, Request};
 use maki_storage::id::SessionRef;
-use serde_json::Value;
+use serde_json::{Value, json};
+use tracing::debug;
 
 use crate::model::{Model, ModelInfo};
 use crate::provider::{BoxFuture, Provider};
+use crate::providers::anthropic::shared;
 use crate::providers::catalog::{
-    CatalogMeta, CatalogTransport, EndpointType, FreeTier, ProviderQuirks,
-    init_shared_catalog_if_needed,
+    CatalogMeta, EndpointType, config_error, init_shared_catalog_if_needed,
 };
-use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
+use crate::providers::http_client;
+use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
+use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
 
-use super::{ResolvedAuth, Timeouts, with_prefix};
+use super::{ResolvedAuth, user_agent, with_prefix};
 
-/// Zen lives under the bare `opencode` models.dev entry; Go has its own.
-pub(crate) const ZEN_SLUG: &str = "opencode";
-pub(crate) const GO_SLUG: &str = "opencode-go";
-pub(crate) const SLUGS: &[&str] = &[ZEN_SLUG, GO_SLUG];
+const MESSAGES_PATH: &str = "/messages";
 
-/// OpenCode asked clients to send one stable ID per conversation and warned
-/// that requests without it may start failing:
-/// https://github.com/tontinton/maki/issues/935
-const SESSION_HEADER: &str = "x-opencode-session";
-const PUBLIC_KEY: &str = "public";
-
-pub(crate) const QUIRKS: ProviderQuirks = ProviderQuirks {
-    free_tier: Some(FreeTier {
-        public_key: PUBLIC_KEY,
-        config_slug: ZEN_SLUG,
-    }),
-    session_header: Some(SESSION_HEADER),
+static CATALOG_CHAT_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+    slug: "opencode",
+    api_key_env: "",
+    base_url: "",
+    max_tokens_field: "max_tokens",
+    include_stream_usage: true,
+    provider_name: "Opencode (Catalog)",
 };
 
 pub struct Opencode {
-    transport: CatalogTransport,
+    client: HttpClient,
+    chat_compat: OpenAiCompatProvider,
     auth: Option<Arc<Mutex<ResolvedAuth>>>,
     system_prefix: Option<String>,
+    stream_timeout: Duration,
 }
 
 impl Opencode {
-    pub fn new(timeouts: Timeouts) -> Self {
-        Self {
-            transport: CatalogTransport::new(timeouts),
+    pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
+        Ok(Self {
+            client: http_client(timeouts),
+            chat_compat: OpenAiCompatProvider::new(&CATALOG_CHAT_CONFIG, timeouts),
             auth: None,
             system_prefix: None,
-        }
+            stream_timeout: timeouts.stream,
+        })
     }
 
-    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: Timeouts) -> Self {
+    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
         Self {
+            client: http_client(timeouts),
+            chat_compat: OpenAiCompatProvider::new(&CATALOG_CHAT_CONFIG, timeouts),
             auth: Some(auth),
-            ..Self::new(timeouts)
+            system_prefix: None,
+            stream_timeout: timeouts.stream,
         }
     }
 
@@ -61,45 +65,103 @@ impl Opencode {
     }
 
     async fn do_list_models(&self) -> Result<Vec<ModelInfo>, AgentError> {
-        Ok(smol::unblock(move || {
-            let guard = init_shared_catalog_if_needed().lock().unwrap();
-            guard.provider(ZEN_SLUG).map_or_else(Vec::new, |data| {
-                data.available_models(&guard.state_dir, data.free_models_enabled())
-            })
-        })
-        .await)
+        Ok(
+            smol::unblock(move || init_shared_catalog_if_needed().lock().unwrap().all_models())
+                .await,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_catalog_chat_completions(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
+        auth: &ResolvedAuth,
+        opts: &RequestOptions,
+    ) -> Result<StreamResponse, AgentError> {
+        let mut body = self.chat_compat.build_body(model, messages, system, tools);
+        opts.thinking
+            .apply_reasoning_effort(&mut body, &dialect::PREFER_HIGH, model);
+        self.chat_compat
+            .do_stream(model, &[], &body, event_tx, auth)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_catalog_messages(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
+        auth: &ResolvedAuth,
+        opts: &RequestOptions,
+    ) -> Result<StreamResponse, AgentError> {
+        let system_blocks = vec![shared::SystemBlock {
+            r#type: "text",
+            text: system,
+            cache_control: Some(shared::EPHEMERAL),
+        }];
+        let mut body = shared::build_request_body_with_system(
+            model,
+            messages,
+            &system_blocks,
+            tools,
+            opts.thinking,
+        );
+        body["model"] = json!(model.id);
+        body["stream"] = json!(true);
+        let json_body = serde_json::to_vec(&body)?;
+        let request = auth
+            .configure_request(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "{}{}",
+                        auth.base_url.as_deref().unwrap_or(""),
+                        MESSAGES_PATH
+                    ))
+                    .header("user-agent", user_agent())
+                    .header("content-type", "application/json")
+                    .header("anthropic-version", "2023-06-01"),
+            )
+            .body(json_body)?;
+
+        debug!(model = %model.id, "sending Anthropic-format request via catalog");
+
+        let response = self.client.send_async(request).await?;
+        let status = response.status().as_u16();
+
+        if status == 200 {
+            crate::providers::anthropic::parse_sse(response, event_tx, self.stream_timeout).await
+        } else {
+            Err(AgentError::from_response(response).await)
+        }
     }
 
     async fn lookup(
         &self,
         sub_provider: &str,
         actual_id: &str,
-        session_id: Option<&SessionRef>,
     ) -> Result<(CatalogMeta, EndpointType, ResolvedAuth), AgentError> {
         let sub_provider = sub_provider.to_string();
         let actual_id = actual_id.to_string();
-        let session_id = session_id.cloned();
         let auth_override = self.auth.clone();
         smol::unblock(move || {
             let guard = init_shared_catalog_if_needed().lock().unwrap();
             let (meta, provider_data) = guard.lookup(&sub_provider, &actual_id)?;
-            let override_auth = auth_override
-                .filter(|_| SLUGS.contains(&provider_data.slug.as_str()))
-                .map(|auth| {
-                    let mut auth = auth.lock().unwrap().clone();
-                    if auth.base_url.is_none() {
-                        auth.base_url = provider_data.base_url.clone();
-                    }
-                    auth
-                });
-            let auth = match override_auth {
-                Some(auth) => auth,
-                None => provider_data
-                    .catalog_auth(&guard.state_dir, provider_data.free_models_enabled())?
-                    .unlocked(&sub_provider)?
-                    .clone(),
-            };
-            let auth = provider_data.request_auth(auth, session_id.as_ref());
+            let state_dir = &guard.state_dir;
+            let auth = provider_data
+                .resolve_auth_with_override(auth_override.as_ref(), state_dir)?
+                .ok_or_else(|| {
+                    config_error(format!(
+                        "authentication required for provider '{sub_provider}', run `maki auth login {sub_provider}`"
+                    ))
+                })?;
             Ok((meta.clone(), provider_data.api_format, auth))
         })
         .await
@@ -115,36 +177,41 @@ impl Provider for Opencode {
         tools: &'a Value,
         event_tx: &'a Sender<ProviderEvent>,
         opts: RequestOptions,
-        session_id: Option<&'a SessionRef>,
+        _session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
-            let (sub_provider, actual_id) =
-                model.id.split_once('/').unwrap_or((ZEN_SLUG, &model.id));
+            let model_for_stream = model.clone();
 
-            let (meta, api_format, auth) = self.lookup(sub_provider, actual_id, session_id).await?;
+            let model_id = &model_for_stream.id;
+            let (sub_provider, actual_id) =
+                model_id.split_once('/').unwrap_or(("opencode", model_id));
+
+            let (meta, api_format, auth) = self.lookup(sub_provider, actual_id).await?;
 
             let mut buf = String::new();
             let system = with_prefix(&self.system_prefix, system, &mut buf);
 
-            let stream_model = Model {
+            let model = Model {
                 id: actual_id.to_string(),
                 max_output_tokens: Some(meta.output),
                 context_window: meta.context,
-                ..model.clone()
+                ..model_for_stream
             };
 
-            self.transport
-                .stream(
-                    api_format,
-                    &stream_model,
-                    messages,
-                    system,
-                    tools,
-                    event_tx,
-                    &auth,
-                    &opts,
-                )
-                .await
+            match api_format {
+                EndpointType::ChatCompletions => {
+                    self.handle_catalog_chat_completions(
+                        &model, messages, system, tools, event_tx, &auth, &opts,
+                    )
+                    .await
+                }
+                EndpointType::Messages => {
+                    self.handle_catalog_messages(
+                        &model, messages, system, tools, event_tx, &auth, &opts,
+                    )
+                    .await
+                }
+            }
         })
     }
 

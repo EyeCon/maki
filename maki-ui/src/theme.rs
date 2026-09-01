@@ -14,7 +14,6 @@ use syntect::highlighting::{
 };
 
 const DEFAULT_THEME: &str = "dracula";
-const THEMES_DIR: &str = "themes";
 const RESERVED_KEYS: &[&str] = &["palette", "ui", "inherits"];
 
 const HELIX_TO_TEXTMATE: &[(&str, &str)] = &[
@@ -290,9 +289,7 @@ pub fn generation() -> u64 {
 }
 
 pub fn load_by_name(name: &str) -> Result<Theme, String> {
-    if let Some(path) = user_themes_dirs()
-        .map(|dir| dir.join(format!("{name}.toml")))
-        .find(|path| path.is_file())
+    if let Some(path) = user_themes_dir().map(|d| d.join(format!("{name}.toml")))
         && let Ok(toml) = std::fs::read_to_string(&path)
     {
         return Theme::from_toml(&toml).map_err(|e| format!("{}: {e}", path.display()));
@@ -304,15 +301,16 @@ pub fn load_by_name(name: &str) -> Result<Theme, String> {
         .unwrap_or_else(|| Err(format!("unknown theme: {name}")))
 }
 
-fn user_themes_dirs() -> impl Iterator<Item = PathBuf> {
-    maki_storage::paths::config_search_dirs()
-        .into_iter()
-        .map(|dir| dir.join(THEMES_DIR))
+fn user_themes_dir() -> Option<PathBuf> {
+    maki_storage::paths::config_dir()
+        .ok()
+        .map(|d| d.join("themes"))
 }
 
 pub fn all_theme_names() -> Vec<String> {
-    let user_names = user_themes_dirs()
-        .filter_map(|dir| std::fs::read_dir(dir).ok())
+    let user_names = user_themes_dir()
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {

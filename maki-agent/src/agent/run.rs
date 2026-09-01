@@ -540,11 +540,11 @@ impl<'h> Agent<'h> {
             context_size: self.context_size,
             context_window: self.model.context_window,
         })?;
-        self.do_compact(None).await?;
+        self.do_compact().await?;
         Ok(true)
     }
 
-    async fn do_compact(&mut self, instructions: Option<&str>) -> Result<(), AgentError> {
+    async fn do_compact(&mut self) -> Result<(), AgentError> {
         let context_size_before = self.context_size;
         let (compact_provider, compact_model) = resolve_compaction_model(
             &self.provider,
@@ -559,7 +559,6 @@ impl<'h> Agent<'h> {
             &self.event_tx,
             &self.cancel,
             &self.config,
-            instructions,
         )
         .await?;
         // The summariser can be a different model, so price this with
@@ -614,8 +613,8 @@ impl<'h> Agent<'h> {
                     });
                 }
             }
-            ExtractedCommand::Compact(instructions) => {
-                self.do_compact(instructions.as_deref()).await?;
+            ExtractedCommand::Compact => {
+                self.do_compact().await?;
             }
         }
         Ok(true)
@@ -1158,7 +1157,7 @@ mod tests {
 
     #[test_case(
         (0..10).map(|i| Message::user(format!("msg {i}"))).collect(),
-        vec![ExtractedCommand::Compact(None)],
+        vec![ExtractedCommand::Compact],
         vec![tool_call_response("glob", "t1"), text_response(StopReason::EndTurn), text_response(StopReason::EndTurn)]
         ; "compaction_via_interrupt_source"
     )]
@@ -1252,7 +1251,7 @@ mod tests {
                 &mut history,
             );
             agent.config.post_compaction_instructions = Some(POST.into());
-            agent.do_compact(None).await.unwrap();
+            agent.do_compact().await.unwrap();
             drop(agent);
 
             let last = history.as_slice().last().unwrap();
