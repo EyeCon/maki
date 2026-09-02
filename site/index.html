@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- minimum-scale pins the page to the layout width: pinching out below it exposes the canvas
+       around the page, and no single canvas colour matches a page that runs sky, paper, sky.
+       zooming in is untouched -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
   <title>maki</title>
   <meta name="description" content="An efficient AI coding agent. Native Rust TUI. Immediate startup, 60 FPS, low memory. Indexes files instead of reading them, chains tools in a sandbox interpreter. Anthropic, OpenAI, Google, Z.AI, OpenRouter, Synthetic, or any OpenAI / Anthropic compatible API.">
   <meta name="theme-color" content="#dbe6ff" media="(prefers-color-scheme: light)">
@@ -164,7 +167,11 @@
     }
 
     html {
-      background: var(--sky-1);
+      /* no background here on purpose: the body's paper propagates to the canvas instead. a
+         background on the root pins the canvas, and the canvas is what the transparent
+         scrollbar track and the overscroll region show, so sky here paints a lavender gutter
+         down a page that is paper for most of its height */
+      overscroll-behavior: none;
       scroll-padding-top: calc(var(--nav-h) + 1.5rem);
       scroll-behavior: smooth;
       -webkit-font-smoothing: antialiased;
@@ -177,14 +184,17 @@
       color: var(--ink);
       background: var(--paper);
     }
-    * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb {
+    /* the page's own scrollbar stays native. a transparent track shows the canvas, and the
+       canvas is one colour while the page runs sky, paper, sky, so the gutter reads as a band
+       of the wrong colour beside whatever section you are on. inner scrollers keep the tint */
+    :not(html) { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+    :not(html)::-webkit-scrollbar { width: 8px; height: 8px; }
+    :not(html)::-webkit-scrollbar-track { background: transparent; }
+    :not(html)::-webkit-scrollbar-thumb {
       background: var(--scroll-thumb);
       border-radius: 99px;
     }
-    ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+    :not(html)::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
     a { color: var(--accent); text-decoration: none; }
     p a {
       text-decoration: underline;
@@ -469,7 +479,12 @@
     .hero-preview { min-width: 0; }
     .tui-scale-wrap { min-width: 0; overflow: hidden; }
     .tui-scale-wrap > .tui { width: fit-content; }
-    .tui-scale-wrap, .doom-demo .tui { border-radius: 10px; box-shadow: var(--demo-shadow); }
+    /* a fixed radius is a fixed number of pixels off the corner, so on a phone, where a
+       terminal row is 8px tall, the corners bite into the status bar. scale it with the cast */
+    .tui-scale-wrap, .tui-scale-wrap > .tui {
+      border-radius: clamp(4px, calc(var(--cast-font, 18px) * 0.6), 10px);
+    }
+    .tui-scale-wrap, .doom-demo .tui { box-shadow: var(--demo-shadow); }
     .tui {
       display: block;
       background: var(--term-bg);
@@ -993,7 +1008,11 @@
     }
     @media (max-width: 768px) {
       .nav-label, .nav-crumb { display: none; }
+      /* no keyboard to shortcut with, and the modal it opens is a desktop affordance */
+      .key-hint, .key-hint + .nav-sep { display: none; }
       .nav-right { gap: 0.85rem; }
+      /* a phone cannot host these lines: wrapped code reads, a line cut mid-token does not */
+      .pane pre { white-space: pre-wrap; overflow-wrap: break-word; font-size: 0.8rem; }
       .hero-preview > .player-controls, .doom-demo .player-controls {
         position: static;
         opacity: 1;
@@ -1556,12 +1575,12 @@ imports = <span class="fn">set</span>()
     if (scaleWrap.clientWidth === wrapWidth) return;
     wrapWidth = scaleWrap.clientWidth;
     const scale = Math.min(1, wrapWidth / tuiWidth);
-    heroTui.style.setProperty('--cast-font', CAST_FONT_PX * scale + 'px');
+    scaleWrap.style.setProperty('--cast-font', CAST_FONT_PX * scale + 'px');
   }
 
   function measureTui() {
     heroTui.classList.add('booted');
-    heroTui.style.removeProperty('--cast-font');
+    scaleWrap.style.removeProperty('--cast-font');
     tuiWidth = heroTui.offsetWidth || TUI_MIN_WIDTH;
     wrapWidth = -1;
     applyScale();
