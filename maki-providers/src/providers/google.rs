@@ -248,6 +248,7 @@ impl Google {
         let body = self.build_body(model, messages, system, tools, thinking, top_p);
         let url = self.stream_url(&model.id);
         let json_body = serde_json::to_vec(&body)?;
+        super::log_wire_body("google_streamgenerate", &json_body);
 
         let request = self
             .build_request("POST", &url)
