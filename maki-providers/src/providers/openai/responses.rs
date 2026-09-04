@@ -166,6 +166,7 @@ pub(crate) async fn do_stream(
         message: "Responses API requires a base_url in auth".into(),
     })?;
     let json_body = serde_json::to_vec(body)?;
+    super::super::log_wire_body("responses", &json_body);
 
     let request = auth
         .configure_request(

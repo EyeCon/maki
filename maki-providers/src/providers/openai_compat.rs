@@ -257,6 +257,7 @@ impl OpenAiCompatProvider {
         auth: &ResolvedAuth,
     ) -> Result<StreamResponse, AgentError> {
         let json_body = serde_json::to_vec(&self.wire_body(body))?;
+        super::log_wire_body("chat_completions", &json_body);
         let mut request = self
             .build_request("POST", "/chat/completions", auth)
             .header("content-type", "application/json");
