@@ -325,6 +325,7 @@ impl Anthropic {
         long_context: bool,
     ) -> Result<StreamResponse, AgentError> {
         let json_body = serde_json::to_vec(body)?;
+        super::log_wire_body("anthropic_messages", &json_body);
         let mut builder = self
             .build_request("POST", MESSAGES_PATH)
             .header("content-type", "application/json");
