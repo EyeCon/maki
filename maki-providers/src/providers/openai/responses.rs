@@ -227,6 +227,7 @@ async fn post_responses(
     stream_timeout: Duration,
 ) -> Result<StreamResponse, AgentError> {
     let json_body = serde_json::to_vec(body)?;
+    super::super::log_wire_body("responses", &json_body);
 
     let request = auth
         .configure_request(

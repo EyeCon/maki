@@ -52,6 +52,17 @@ fn bearer_value(api_key: &str) -> String {
     format!("{BEARER_PREFIX}{api_key}")
 }
 
+/// Logs the serialized request body when `MAKI_LOG_WIRE=1`, so the exact JSON
+/// maki sends (after `extra_body` merging) lands in `maki.log` without a
+/// proxying capture server. Contains full prompts; debug-only and opt-in.
+pub(crate) fn log_wire_body(endpoint: &str, json_body: &[u8]) {
+    if std::env::var("MAKI_LOG_WIRE").is_ok_and(|v| v == "1")
+        && let Ok(text) = std::str::from_utf8(json_body)
+    {
+        tracing::debug!(endpoint = %endpoint, body = %text, "wire request body");
+    }
+}
+
 pub(crate) fn user_agent() -> &'static str {
     concat!(
         "maki/v",
@@ -907,5 +918,81 @@ mod tests {
 
         assert!(!KeyRotation::new(&pool, &auth, KeyHeader::Bearer).rotate());
         assert_eq!(pool.current(), KEY_1);
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_wire_log(json_body: &[u8]) -> String {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_wire_body("chat_completions", json_body);
+        });
+        String::from_utf8_lossy(&capture.0.lock().unwrap()).into_owned()
+    }
+
+    // SAFETY: the tests below are the only readers of MAKI_LOG_WIRE in this
+    // binary and the lock orders their set/remove, so no other thread in this
+    // shared-process runner observes the flip.
+    static WIRE_LOG_ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn log_wire_body_opt_in_logs_endpoint_and_body() {
+        let _env = WIRE_LOG_ENV.lock().unwrap();
+        // SAFETY: see WIRE_LOG_ENV.
+        unsafe { std::env::set_var("MAKI_LOG_WIRE", "1") };
+
+        let logged = capture_wire_log(br#"{"model":"m"}"#);
+
+        assert!(logged.contains("wire request body"));
+        assert!(logged.contains("chat_completions"));
+        assert!(logged.contains(r#"{"model":"m"}"#));
+
+        // SAFETY: see WIRE_LOG_ENV.
+        unsafe { std::env::remove_var("MAKI_LOG_WIRE") };
+    }
+
+    #[test]
+    fn log_wire_body_without_opt_in_is_silent() {
+        let _env = WIRE_LOG_ENV.lock().unwrap();
+        // SAFETY: see WIRE_LOG_ENV.
+        unsafe { std::env::remove_var("MAKI_LOG_WIRE") };
+
+        assert!(capture_wire_log(br#"{"model":"m"}"#).is_empty());
+    }
+
+    #[test]
+    fn log_wire_body_non_utf8_body_is_silent() {
+        let _env = WIRE_LOG_ENV.lock().unwrap();
+        // SAFETY: see WIRE_LOG_ENV.
+        unsafe { std::env::set_var("MAKI_LOG_WIRE", "1") };
+
+        assert!(capture_wire_log(&[0xFF, 0xFE, b'{', b'}']).is_empty());
+
+        // SAFETY: see WIRE_LOG_ENV.
+        unsafe { std::env::remove_var("MAKI_LOG_WIRE") };
     }
 }
