@@ -81,8 +81,10 @@ pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, Agent
             auth, timeouts,
         ))),
         ProviderKind::OpenAi => Ok(Box::new(CustomOpenAiProvider {
-            compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts)
-                .with_extra_body(def.and_then(|d| d.extra_body.clone())),
+            compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts).with_extra_body(
+                def.and_then(|d| d.extra_body.clone()),
+                def.and_then(|d| d.extra_body_policy.clone()),
+            ),
             auth,
             protocol,
         })),
