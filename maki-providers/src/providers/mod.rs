@@ -525,12 +525,13 @@ mod tests {
     fn ignored_builtin_fields_keeps_extra_body_for_openai_compat_builtins() {
         let def = maki_config::providers::ProviderDef {
             extra_body: Some(Default::default()),
+            extra_body_policy: Some(Default::default()),
             ..Default::default()
         };
         assert!(maki_config::providers::ignored_builtin_fields("openrouter", &def).is_empty());
         assert_eq!(
             maki_config::providers::ignored_builtin_fields("anthropic", &def),
-            ["extra_body"]
+            ["extra_body", "extra_body_policy"]
         );
     }
 

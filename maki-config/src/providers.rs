@@ -212,9 +212,25 @@ pub struct ProviderDef {
     pub models: Vec<ModelDef>,
     /// Extra top-level JSON fields merged into every inference request body
     /// (openai-compat providers only; e.g. `preset = "my-slug"` for
-    /// OpenRouter). Configured values win over fields maki computes.
+    /// OpenRouter). How each key combines with the field maki computes is set
+    /// per key by `extra_body_policy` (default `replace`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<BTreeMap<String, serde_json::Value>>,
+    /// Per-key policy for `extra_body`: `merge` combines with the computed
+    /// value (objects merge recursively, arrays concatenate, scalars
+    /// replace), `remove` deletes the computed field (ignoring any
+    /// configured value), default `replace` overwrites it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body_policy: Option<BTreeMap<String, ExtraBodyPolicy>>,
+}
+
+/// How an `extra_body` key combines with the field maki computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExtraBodyPolicy {
+    Merge,
+    Replace,
+    Remove,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -379,13 +395,16 @@ pub fn ignored_builtin_fields(slug: &str, def: &ProviderDef) -> Vec<&'static str
     if def.enable_free_models.is_some() && slug != OPENCODE_SLUG {
         ignored.push("enable_free_models");
     }
-    if def.extra_body.is_some()
-        && !matches!(
-            builtin_provider(slug).map(|b| b.protocol),
-            Some(Protocol::Openai | Protocol::OpenaiResponses)
-        )
-    {
-        ignored.push("extra_body");
+    if !matches!(
+        builtin_provider(slug).map(|b| b.protocol),
+        Some(Protocol::Openai | Protocol::OpenaiResponses)
+    ) {
+        if def.extra_body.is_some() {
+            ignored.push("extra_body");
+        }
+        if def.extra_body_policy.is_some() {
+            ignored.push("extra_body_policy");
+        }
     }
     ignored
 }
@@ -529,6 +548,36 @@ route_nested = { sort = "price" }
         assert_eq!(def.extra_body, None);
     }
 
+    const EXTRA_BODY_POLICY_TOML: &str = r#"
+[extra_body]
+temperature = 0.5
+[extra_body_policy]
+tools = "merge"
+temperature = "remove"
+stream_options = "replace"
+"#;
+
+    #[test]
+    fn provider_def_extra_body_policy_parses() {
+        let def: ProviderDef = toml::from_str(EXTRA_BODY_POLICY_TOML).unwrap();
+        let policy = def.extra_body_policy.unwrap();
+        assert_eq!(policy["tools"], ExtraBodyPolicy::Merge);
+        assert_eq!(policy["temperature"], ExtraBodyPolicy::Remove);
+        assert_eq!(policy["stream_options"], ExtraBodyPolicy::Replace);
+    }
+
+    #[test]
+    fn provider_def_extra_body_policy_defaults_none() {
+        let def: ProviderDef = toml::from_str(EMPTY_PROVIDER_DEF_TOML).unwrap();
+        assert_eq!(def.extra_body_policy, None);
+    }
+
+    #[test]
+    fn provider_def_extra_body_policy_rejects_unknown() {
+        let def: Result<ProviderDef, _> = toml::from_str("[extra_body_policy]\ntools = \"append\"");
+        assert!(def.is_err());
+    }
+
     const UNKNOWN_TIER_TOML: &str = r#"id = "x"
 tier = "mediums"
 "#;
@@ -663,6 +712,18 @@ tier = "{input}"
         };
         assert_eq!(ignored_builtin_fields("anthropic", &def), ["extra_body"]);
         assert_eq!(ignored_builtin_fields("google", &def), ["extra_body"]);
+    }
+
+    #[test]
+    fn ignored_builtin_fields_flags_extra_body_policy_for_non_openai_protocols() {
+        let def = ProviderDef {
+            extra_body_policy: Some(Default::default()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ignored_builtin_fields("anthropic", &def),
+            ["extra_body_policy"]
+        );
     }
 
     #[test_case("MyProvider", "myprovider"; "mixed_case")]

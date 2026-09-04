@@ -206,6 +206,7 @@ supports_vision = false
 | `models` | array | Declared models for custom providers (see below) |
 | `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
 | `extra_body` | table | OpenAI-compat providers. JSON fields merged into every request body, overriding fields maki computes (e.g. `preset = "my-slug"` for an OpenRouter preset) |
+| `extra_body_policy` | table | OpenAI-compat providers. How each `extra_body` key combines with the field maki computes: `merge` (objects merge recursively, arrays concatenate, scalars replace), `replace` (default), or `remove` (delete the computed field; a configured value is ignored) |
 
 ### Model fields
 
