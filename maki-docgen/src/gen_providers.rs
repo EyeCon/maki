@@ -158,6 +158,8 @@ Env `<SLUG>_BASE_URL` still wins over both the plan and a `base_url` in this fil
 1. Tweak a built-in (pick a plan, change its base URL, set `enable_free_models` for Opencode).
 2. Declare a custom provider that speaks OpenAI, Anthropic, or Google wire format.
 
+To read `providers.toml` (and the other config files) from somewhere else, see [metaconfig.toml](/docs/configuration/#redirecting-config-files).
+
 ```toml
 # Point a built-in at a proxy. Env vars still win over this file.
 [anthropic]

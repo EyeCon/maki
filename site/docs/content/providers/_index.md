@@ -338,6 +338,8 @@ If the model name is unique across providers, the prefix can be omitted.
 1. Tweak a built-in (pick a plan, change its base URL, set `enable_free_models` for Opencode).
 2. Declare a custom provider that speaks OpenAI, Anthropic, or Google wire format.
 
+To read `providers.toml` (and the other config files) from somewhere else, see [metaconfig.toml](/docs/configuration/#redirecting-config-files).
+
 ```toml
 # Point a built-in at a proxy. Env vars still win over this file.
 [anthropic]

@@ -305,9 +305,13 @@ pub fn load_by_name(name: &str) -> Result<Theme, String> {
 }
 
 fn user_themes_dirs() -> impl Iterator<Item = PathBuf> {
-    maki_storage::paths::config_search_dirs()
+    maki_storage::metaconfig::dir_override(THEMES_DIR)
         .into_iter()
-        .map(|dir| dir.join(THEMES_DIR))
+        .chain(
+            maki_storage::paths::config_search_dirs()
+                .into_iter()
+                .map(|dir| dir.join(THEMES_DIR)),
+        )
 }
 
 pub fn all_theme_names() -> Vec<String> {

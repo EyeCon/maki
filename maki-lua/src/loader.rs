@@ -30,6 +30,7 @@ use maki_storage::id::MakiId;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const PACK_STATE_UNAVAILABLE: &str = "could not read package state: plugin host stopped";
 const USER_PLUGIN: &str = "user";
+const INIT_LUA: &str = "init.lua";
 pub const SKIPPED_PLUGIN_WARNING: &str = "skipping plugin lua";
 /// Tests assert on this exact text, so a wording tweak here updates them too.
 pub const PERMISSION_NAME_WARNING: &str = "inherits maki's permission rules for the builtin \
@@ -302,19 +303,14 @@ impl PluginHost {
     ) -> Result<Option<RawConfig>, PluginError> {
         let mut merged: Option<RawConfig> = None;
 
-        for global_dir in maki_storage::paths::config_search_dirs() {
-            self.run_init_file(
-                &global_dir.join("init.lua"),
-                ConfigScope::Global,
-                &mut merged,
-                warnings,
-            )?;
+        for path in maki_storage::metaconfig::candidates(INIT_LUA) {
+            self.run_init_file(&path, ConfigScope::Global, &mut merged, warnings)?;
             if merged.is_some() {
                 break;
             }
         }
         self.run_init_file(
-            &cwd.join(".maki/init.lua"),
+            &cwd.join(".maki").join(INIT_LUA),
             ConfigScope::Project,
             &mut merged,
             warnings,
