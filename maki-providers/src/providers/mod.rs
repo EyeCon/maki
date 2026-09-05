@@ -9,7 +9,7 @@ use isahc::config::{Configurable, VersionNegotiation};
 use isahc::http::request::Builder;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use maki_storage::StateDir;
 use maki_storage::auth::{OAuthTokens, load_tokens, lock_tokens, save_tokens};
@@ -100,7 +100,13 @@ pub(crate) fn refreshed_tokens(
         return Ok(current);
     }
     let fresh = refresh(&current)?;
-    save_tokens(dir, provider, &fresh)?;
+    // Not `?`: every caller reads an error here as "these credentials are
+    // dead" and deletes the token file, so a full disk would log the user out
+    // over a refresh that actually succeeded. The run keeps the token it just
+    // got and the next start refreshes again.
+    if let Err(e) = save_tokens(dir, provider, &fresh) {
+        warn!(provider, error = %e, "could not persist refreshed OAuth tokens");
+    }
     Ok(fresh)
 }
 
