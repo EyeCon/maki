@@ -582,12 +582,19 @@ fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), Ac
     let input =
         AgentInput::from_defaults(message, session.current_mode.clone(), images, srv.defaults);
 
+    // One outstanding id per session, checked and set under the same guard:
+    // `input_tx` is unbounded, so a second prompt would queue happily and
+    // overwrite the first id, leaving that request unanswered forever.
+    let mut pending = session.pending.lock().unwrap();
+    if pending.prompt.is_some() {
+        return Err(AcpError::new(-32603, "a prompt is already running"));
+    }
     session
         .handle
         .input_tx
         .send(input)
         .map_err(|_| AcpError::new(-32603, "session ended"))?;
-    session.pending.lock().unwrap().prompt = Some(id.clone());
+    pending.prompt = Some(id.clone());
     Ok(())
 }
 
