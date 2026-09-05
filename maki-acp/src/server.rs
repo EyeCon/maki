@@ -332,7 +332,7 @@ fn start_session(
     // for a TUI that does not exist, so it is dropped and the model asks in
     // plain text instead.
     let (excluded_tools, local_tools) = if srv.client_elicits_form {
-        let tool = question_tool(srv.out_tx.clone(), Arc::clone(&pending));
+        let tool = question_tool(srv.out_tx.downgrade(), Arc::clone(&pending));
         let map: LocalTools = Arc::new(HashMap::from([(QUESTION_TOOL_NAME.to_owned(), tool)]));
         (Vec::new(), map)
     } else {
@@ -402,7 +402,10 @@ fn ask_client(
 /// Shadows the Lua `question` tool: sends `elicitation/create` to the client
 /// and blocks the tool call until the form comes back. Serializes on the same
 /// answer channel as permissions, so at most one ask is in flight.
-fn question_tool(out_tx: Sender<Value>, pending: PendingState) -> LocalTool {
+/// Weak, because `LocalTools` is captured verbatim by every `LuaCtx` a tool
+/// call parks and an idle VM never collects it. A strong clone here outlives
+/// `serve()` and leaves `writer_task` waiting on a sender nobody will drop.
+fn question_tool(out_tx: WeakSender<Value>, pending: PendingState) -> LocalTool {
     // The audience the Lua `question` tool carries: shadowing a tool must not
     // widen who may call it.
     local_tool(ToolAudience::MAIN, move |input, ctx| {
@@ -418,6 +421,7 @@ fn question_tool(out_tx: Sender<Value>, pending: PendingState) -> LocalTool {
             // scope pointing at a tool call the client never saw would get
             // the elicitation rejected or dropped.
             let tool_call_id = ctx.tool_use_id.filter(|id| !id.is_empty());
+            let out_tx = out_tx.upgrade().ok_or("connection closed")?;
             let request = elicitation::form_request(&session_id, tool_call_id, &input)?;
             let rx = ctx.user_response_rx.as_ref().ok_or("no answer channel")?;
 
