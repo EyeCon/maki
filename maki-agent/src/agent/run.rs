@@ -343,6 +343,7 @@ impl<'h> Agent<'h> {
             &self.event_tx,
             &self.cancel,
             self.opts,
+            self.context_size,
             self.session_id.as_ref(),
         )
         .await
