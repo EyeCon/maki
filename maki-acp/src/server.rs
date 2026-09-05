@@ -41,6 +41,10 @@ use tracing::{debug, warn};
 use crate::{AcpParams, SessionEndHook, elicitation, methods, permissions, translate};
 
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
+/// Turns already recorded were priced when they ran. `always_fast` is a live
+/// config value, so reading it here would reprice history the user paid for at
+/// standard rates. New turns still honour it.
+const RESTORED_FAST: bool = false;
 
 /// Ids come from here and are never reused, so a late answer for a closed
 /// session cannot match a request of the session that replaced it.
@@ -297,7 +301,7 @@ async fn load_session(
         &restored.usage,
         &mut restored.by_model,
         &recorded_model,
-        params.defaults.fast,
+        RESTORED_FAST,
     );
     let started = start_session(
         srv,
