@@ -18,7 +18,7 @@ use crate::{
     dialect,
 };
 
-use super::openai_compat::{MODELS_PATH, OpenAiCompatConfig, OpenAiCompatProvider};
+use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{KeyHeader, KeyPool, KeyRotation, ResolvedAuth, Timeouts};
 
 const REFERER: &str = "https://maki.sh";
@@ -274,7 +274,7 @@ impl Provider for OpenRouter {
         Box::pin(async move {
             let auth = self.auth.lock().unwrap().clone();
             self.compat
-                .fetch_and_parse_models(&auth, MODELS_PATH, parse_model)
+                .fetch_and_parse_models(&auth, "/models/user", parse_model)
                 .await
         })
     }
