@@ -224,7 +224,9 @@ impl Provider for OpenRouter {
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
         Box::pin(async move {
             let auth = self.auth.lock().unwrap().clone();
-            self.compat.fetch_and_parse_models(&auth, parse_model).await
+            self.compat
+                .fetch_and_parse_models(&auth, "/models/user", parse_model)
+                .await
         })
     }
 
