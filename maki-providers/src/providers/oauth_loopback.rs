@@ -388,9 +388,9 @@ mod tests {
     use test_case::test_case;
 
     use super::{
-        CallbackResult, Duration, Instant, Loopback, RAW_CODE_MSG, SLOW_REQUEST_MSG, STATE_MISMATCH,
-        bind_localhost, parse_callback_input, parse_callback_query, parse_callback_target,
-        pkce_pair, read_request_head, request_path,
+        CallbackResult, Duration, Instant, Loopback, RAW_CODE_MSG, SLOW_REQUEST_MSG,
+        STATE_MISMATCH, bind_localhost, parse_callback_input, parse_callback_query,
+        parse_callback_target, pkce_pair, read_request_head, request_path,
     };
 
     /// A peer that keeps the connection alive but never ends the head.
