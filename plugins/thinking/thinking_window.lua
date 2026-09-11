@@ -10,7 +10,7 @@ local Picker = require("thinking_picker")
 local UNSUPPORTED = "Thinking requires a model that supports it"
 local FLASH_PREFIX = "Thinking: "
 local TITLE_PREFIX = " Thinking · "
-local FOOTER = { { "↑↓", "move" }, { "⏎", "apply" }, { "esc", "cancel" } }
+local FOOTER = { { "↑↓", "move" }, { "⏎", "apply" }, { "Esc", "cancel" } }
 -- The content is a fixed-column table, so the window keeps an absolute width
 -- instead of stretching across an ultrawide terminal.
 local WIDTH = 52
