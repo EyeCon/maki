@@ -11,6 +11,7 @@ use crate::components::usage_modal::UsageModalContext;
 use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
 use maki_lua::Split;
+use maki_providers::RequestOptions;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::text::{Line, Span};
@@ -289,6 +290,10 @@ impl App {
     fn render_status_bar(&mut self, frame: &mut Frame, status_area: Rect, render_chat: usize) {
         let chat = &self.chats[render_chat];
         let chat_name = (self.chats.len() > 1).then_some(chat.name.as_str());
+        let opts = chat.opts.unwrap_or(RequestOptions {
+            thinking: self.state.thinking,
+            fast: self.state.fast,
+        });
         let (mode_label, mode_style) = self.mode_label();
         let ctx = StatusBarContext {
             status: &self.status,
@@ -308,8 +313,8 @@ impl App {
             auto_scroll: chat.auto_scroll(),
             chat_name,
             retry_info: self.retry_info.as_ref(),
-            thinking_label: chat.thinking.unwrap_or(self.state.thinking).status_label(),
-            fast: chat.fast.unwrap_or(self.state.fast),
+            thinking_label: opts.thinking.status_label(),
+            fast: opts.fast,
             workflow: self.state.workflow,
             yolo: self.permissions.is_yolo(),
             restoring: self.restoring.load(Ordering::Relaxed),

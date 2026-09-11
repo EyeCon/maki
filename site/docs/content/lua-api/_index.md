@@ -1267,8 +1267,8 @@ and tool set.
     starts with no loaded tools of its own. Default: `true`.
   - `thinking` (`string|integer?`) thinking mode: `"off"`, `"adaptive"`, an
     effort level (`"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`,
-    `"max"`), or a budget integer (token count). Inherits parent setting
-    if omitted.
+    `"max"`), or a budget integer (token count). Inherits the parent
+    setting if omitted, and is capped at it otherwise.
   - `fast` (`boolean?`) use fast mode. Inherits parent setting if omitted.
 
 **Returns:** ([`Session?`](#maki-agent-Session), `string?`) Session handle, or `(nil, err)` on failure.

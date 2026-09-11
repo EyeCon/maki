@@ -429,8 +429,8 @@ async fn call_tool(
 ///     starts with no loaded tools of its own. Default: `true`.
 ///   `thinking` (string|integer?) - thinking mode: `"off"`, `"adaptive"`, an
 ///     effort level (`"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`,
-///     `"max"`), or a budget integer (token count). Inherits parent setting
-///     if omitted.
+///     `"max"`), or a budget integer (token count). Inherits the parent
+///     setting if omitted, and is capped at it otherwise.
 ///   `fast` (boolean?) - use fast mode. Inherits parent setting if omitted.
 /// @return (Session?, string?) Session handle, or `(nil, err)` on failure.
 /// @example
@@ -532,28 +532,28 @@ async fn session(
         }
     }
 
+    // Numbers take the same route as strings: `parse_setting` already spells
+    // out every accepted word and budget, so there is one grammar and one
+    // error message instead of a second one per Lua number type.
     let requested_thinking = match thinking_val {
-        Some(LuaValue::String(s)) => match StoredThinking::parse_setting(&s.to_str()?) {
-            Ok(stored) => Some(ThinkingConfig::from(stored)),
-            Err(e) => return Ok(err_pair(format!("invalid thinking: {e}"))),
-        },
-        Some(LuaValue::Integer(n)) => match u32::try_from(n) {
-            Ok(tokens) if tokens > 0 => Some(ThinkingConfig::Budget(tokens)),
-            _ => return Ok(err_pair(format!("invalid thinking budget: {n}"))),
-        },
-        Some(LuaValue::Number(n)) if n >= 1.0 && n <= f64::from(u32::MAX) => {
-            Some(ThinkingConfig::Budget(n as u32))
-        }
-        Some(LuaValue::Number(n)) => {
-            return Ok(err_pair(format!("invalid thinking budget: {n}")));
-        }
-        Some(other) => {
-            return Ok(err_pair(format!(
-                "thinking must be string or number, got {}",
-                other.type_name()
-            )));
-        }
         None => None,
+        Some(value) => {
+            let setting = match &value {
+                LuaValue::String(s) => s.to_str()?.to_owned(),
+                LuaValue::Integer(n) => n.to_string(),
+                LuaValue::Number(n) => n.to_string(),
+                other => {
+                    return Ok(err_pair(format!(
+                        "thinking must be string or number, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            match StoredThinking::parse_setting(&setting) {
+                Ok(stored) => Some(ThinkingConfig::from(stored)),
+                Err(e) => return Ok(err_pair(format!("invalid thinking: {e}"))),
+            }
+        }
     };
     // Omitting inherits the parent as-is; an explicit level is capped at it
     // first, then reconciled once with the model so the status badge,
@@ -561,7 +561,7 @@ async fn session(
     let thinking = requested_thinking.map_or(agent_ctx.opts.thinking, |t| {
         t.clamp_to(agent_ctx.opts.thinking)
     });
-    let RequestOptions { thinking, fast } = RequestOptions { thinking, fast }.clamped(&model);
+    let opts = RequestOptions { thinking, fast }.clamped(&model);
 
     let (stream_guard, sub_events) = event_stream();
     let sub_event_tx = stream_guard.sender(agent_ctx.event_tx.run_id());
@@ -629,8 +629,7 @@ async fn session(
         },
         system: system.unwrap_or_default(),
         tools,
-        thinking,
-        fast,
+        opts,
         mcp: agent_ctx
             .mcp
             .as_ref()
@@ -750,8 +749,7 @@ struct SessionState {
     system: String,
     tools: RequestTools,
     /// Already reconciled against `params.model`, so every reader agrees.
-    thinking: ThinkingConfig,
-    fast: bool,
+    opts: RequestOptions,
     /// Fresh per session so `tool_search` loads never leak between a
     /// subagent and its parent.
     mcp: Option<McpSession>,
@@ -859,8 +857,7 @@ async fn prompt(
             name: s.name.clone(),
             prompt: Some(message.clone()),
             model: Some(s.params.model.spec()),
-            thinking: Some(s.thinking),
-            fast: Some(s.fast),
+            opts: Some(s.opts),
             answer_tx: s.answer_tx.take(),
         });
     }
@@ -885,8 +882,8 @@ async fn prompt(
         mode: AgentMode::Build,
         images: Vec::new(),
         preamble: Vec::new(),
-        thinking: s.thinking,
-        fast: s.fast,
+        thinking: s.opts.thinking,
+        fast: s.opts.fast,
         workflow: false,
         prompt: None,
     };
@@ -1066,8 +1063,7 @@ mod tests {
             name: "research".into(),
             prompt: None,
             model: None,
-            thinking: None,
-            fast: None,
+            opts: None,
             answer_tx: None,
         })
         .unwrap();

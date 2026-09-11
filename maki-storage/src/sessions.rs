@@ -415,10 +415,12 @@ pub struct StoredSubagent {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Absent on subagents written before this was recorded, and the one flag
+    /// that says whether `fast` below is the subagent's or just a default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<StoredThinking>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fast: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fast: bool,
 }
 
 #[derive(Deserialize)]
@@ -1826,7 +1828,7 @@ mod tests {
                 name: "sub".into(),
                 model: None,
                 thinking: None,
-                fast: None,
+                fast: false,
             }
         }
 

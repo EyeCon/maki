@@ -23,7 +23,9 @@ use maki_lua::{
     BuiltinAction, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader, PackCommand,
     PackPlan, PackPreparation, PackReport, SessionEndReason,
 };
-use maki_providers::{ContentBlock, Effort, Message, Role, THINKING_USAGE, TokenUsage};
+use maki_providers::{
+    ContentBlock, Effort, Message, RequestOptions, Role, THINKING_USAGE, TokenUsage,
+};
 use maki_storage::sessions::{SessionMeta, StoredMode, StoredThinking};
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -251,8 +253,7 @@ fn subagent_info_with_tx(
         name: name.into(),
         prompt: None,
         model: None,
-        thinking: None,
-        fast: None,
+        opts: None,
         answer_tx,
     }
 }
@@ -2418,12 +2419,16 @@ fn mouse_down_in_input_creates_input_zone_selection() {
 }
 
 #[test]
-fn resolve_or_create_chat_sets_subagent_fast() {
+fn resolve_or_create_chat_sets_subagent_opts() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
+    let opts = RequestOptions {
+        thinking: ThinkingConfig::Effort(Effort::High),
+        fast: true,
+    };
     let mut info = subagent_info(TASK_ID, "research");
-    info.fast = Some(false);
+    info.opts = Some(opts);
 
     app.update(Msg::Agent(Box::new(Envelope {
         event: AgentEvent::TextDelta { text: "hi".into() },
@@ -2431,27 +2436,7 @@ fn resolve_or_create_chat_sets_subagent_fast() {
         run_id: 1,
     })));
 
-    assert_eq!(app.chats[1].fast, Some(false));
-}
-
-#[test]
-fn resolve_or_create_chat_sets_subagent_thinking() {
-    let mut app = test_app();
-    app.status = Status::Streaming;
-    app.run_id = 1;
-    let mut info = subagent_info(TASK_ID, "research");
-    info.thinking = Some(ThinkingConfig::Effort(maki_providers::Effort::High));
-
-    app.update(Msg::Agent(Box::new(Envelope {
-        event: AgentEvent::TextDelta { text: "hi".into() },
-        subagent: Some(info),
-        run_id: 1,
-    })));
-
-    assert_eq!(
-        app.chats[1].thinking,
-        Some(ThinkingConfig::Effort(maki_providers::Effort::High))
-    );
+    assert_eq!(app.chats[1].opts, Some(opts));
 }
 
 #[test]

@@ -756,31 +756,18 @@ impl ThinkingConfig {
     /// Caps this config at `parent`. A subagent's thinking request is written
     /// by the model, not the user, so it may go down but never above what the
     /// parent session runs with. `Adaptive` on either side means "let the model
-    /// decide" rather than a ceiling, so it never caps.
+    /// decide" rather than a ceiling, so it never caps. Both sides compare as
+    /// token budgets, which is the only unit an effort level and an explicit
+    /// count share; the winner keeps its original form either way.
     pub fn clamp_to(self, parent: Self) -> Self {
-        match (parent, self) {
-            (Self::Off, _) | (_, Self::Off) => Self::Off,
-            (Self::Adaptive, _) | (_, Self::Adaptive) => self,
-            (Self::Effort(parent_level), Self::Effort(level)) => {
-                Self::Effort(parent_level.min(level))
-            }
-            (Self::Budget(parent_tokens), Self::Budget(tokens)) => {
-                Self::Budget(parent_tokens.min(tokens))
-            }
-            // Mixed units compare as effort but keep their original form, so an
-            // explicit token budget is never rewritten into a level.
-            (Self::Effort(parent_level), Self::Budget(tokens)) => {
-                if parent_level <= Effort::from_budget(tokens, FALLBACK_MAX_THINKING_BUDGET) {
-                    parent
-                } else {
+        match (parent.budget(None), self.budget(None)) {
+            (Budgeted::Off, _) | (_, Budgeted::Off) => Self::Off,
+            (Budgeted::Adaptive, _) | (_, Budgeted::Adaptive) => self,
+            (Budgeted::Tokens(ceiling), Budgeted::Tokens(asked)) => {
+                if asked <= ceiling {
                     self
-                }
-            }
-            (Self::Budget(parent_tokens), Self::Effort(level)) => {
-                if Effort::from_budget(parent_tokens, FALLBACK_MAX_THINKING_BUDGET) <= level {
-                    parent
                 } else {
-                    self
+                    parent
                 }
             }
         }

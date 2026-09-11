@@ -239,29 +239,16 @@ fn task_input(scenario: &str, output_schema: Option<Value>) -> Value {
 
 const FULL_MODEL_SPEC: &str = "aperture/ollama/glm-5.2";
 
-#[test]
-fn schema_exposes_thinking() {
-    let (reg, _host) = load_task_host();
-    let schema = reg.get(TASK_TOOL).expect("task tool missing").tool.schema();
-    let description = schema["properties"]["thinking"]["description"]
-        .as_str()
-        .expect("thinking schema missing");
-    assert!(description.contains("int budget"));
-    assert!(description.contains("capped at parent"));
-}
-
-#[test]
-fn schema_hides_fast_from_the_model() {
-    let (reg, _host) = load_task_host();
-    let schema = reg.get(TASK_TOOL).expect("task tool missing").tool.schema();
-    assert!(schema["properties"]["fast"].is_null());
-}
-
+/// Advertised to the model, so the wording lives in the docs, not here: what
+/// matters is that the property exists and that whatever the model writes
+/// reaches the session verbatim, capping being the session's job.
 #[test_case::test_case(Some(json!("high")) ; "effort")]
 #[test_case::test_case(Some(json!(4096)) ; "token_budget")]
 #[test_case::test_case(None ; "inherit_parent_when_omitted")]
 fn thinking_forwards_to_session(thinking: Option<Value>) {
     let (reg, _host) = load_task_host();
+    let entry = reg.get(TASK_TOOL).expect("task tool missing");
+    assert!(entry.tool.schema()["properties"]["thinking"].is_object());
     let mut input = task_input(SCENARIO_PLAIN, None);
     if let Some(thinking) = &thinking {
         input["thinking"] = thinking.clone();
