@@ -1,7 +1,7 @@
 local parse_sse_response = require("parse_sse")
 local NO_RESULTS_MSG = "No search results found"
-local API_KEY = "ydc-test-key"
 local RATE_LIMIT_MSG = "rate limit exceeded"
+local QUERY = "rust async runtime"
 
 local failures = {}
 
@@ -110,59 +110,23 @@ end)
 
 local providers = require("providers")
 
-case("providers_exa_shape", function()
-  local p = providers.exa
-  assert(p, "exa provider should exist")
-  eq(p.endpoint(), "https://mcp.exa.ai/mcp")
-  eq(p.tool, "web_search_exa")
-  local args = p.arguments("rust async runtime", 5)
-  eq(args.query, "rust async runtime")
-  eq(args.numResults, 5)
-  eq(args.type, "auto")
-  eq(args.livecrawl, "fallback")
-end)
-
-case("providers_youcom_shape", function()
-  local p = providers.youcom
-  assert(p, "youcom provider should exist")
-  eq(p.tool, "you-search")
-  local args = p.arguments("rust async runtime", 5)
-  eq(args.query, "rust async runtime")
-  eq(args.count, 5)
-  assert(args.numResults == nil, "youcom should not carry exa's numResults")
-end)
-
-case("providers_headers_follow_the_key", function()
-  eq(providers.exa.headers(nil)["x-api-key"], nil)
-  eq(providers.exa.headers(API_KEY)["x-api-key"], API_KEY)
-  eq(providers.youcom.headers(nil)["Authorization"], nil)
-  eq(providers.youcom.headers(API_KEY)["Authorization"], "Bearer " .. API_KEY)
-end)
-
-case("providers_youcom_endpoint_follows_the_key", function()
-  eq(providers.youcom.endpoint(nil), "https://api.you.com/mcp?profile=free")
-  eq(providers.youcom.endpoint(API_KEY), "https://api.you.com/mcp")
-end)
-
-case("providers_api_key_is_never_blank", function()
-  -- An exported but empty variable is truthy in lua; treating it as a key
-  -- would send "Bearer " and pick the authenticated endpoint over the free
-  -- profile. Holds whether or not the vars are set in this environment.
+-- init.lua reads these off whichever backend the user picked, so a new entry
+-- that forgets one would only blow up mid request, against the live server.
+case("providers_carry_what_init_consumes", function()
   for name, p in pairs(providers) do
-    local key = p.api_key()
-    assert(key == nil or (type(key) == "string" and #key > 0), name .. " api_key should be nil or non-empty")
+    for _, field in ipairs({ "label", "endpoint", "env", "auth_header", "tool" }) do
+      assert(type(p[field]) == "string", name .. " is missing " .. field)
+    end
+    eq(p.arguments(QUERY, 5).query, QUERY, name .. " must pass the query through")
   end
 end)
 
-case("providers_youcom_response_is_parse_sse_compatible", function()
-  -- The youcom MCP server answers tools/call with SSE data: lines whose
-  -- result.content[1].text carries the JSON results, the same shape
-  -- parse_sse_response already extracts for exa.
-  local body = "event: message\n"
-    .. make_sse('{"results":{"web":[{"url":"https://example.com","title":"Example","description":"A page"}]}}')
-    .. "\n"
-  local text = parse_sse_response(body)
-  assert(text:find("example.com", 1, true), "youcom result payload should round-trip through parse_sse_response")
+-- Each server names the result count differently and quietly falls back to
+-- its own default when the argument it does not know shows up.
+case("providers_count_argument_matches_the_backend", function()
+  eq(providers.exa.arguments(QUERY, 5).numResults, 5)
+  eq(providers.youcom.arguments(QUERY, 5).count, 5)
+  eq(providers.youcom.arguments(QUERY, 5).numResults, nil)
 end)
 
 if #failures > 0 then

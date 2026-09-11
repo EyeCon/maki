@@ -25,6 +25,13 @@ if not provider then
   error('websearch: unknown provider "' .. tostring(opts.provider) .. '" (expected "exa" or "youcom")')
 end
 
+-- An exported but blank variable is still truthy in lua, and a blank key
+-- means an empty auth header instead of the keyless path that would work.
+local function api_key()
+  local key = (maki.uv.os_getenv(provider.env) or ""):match("^%s*(.-)%s*$")
+  return key ~= "" and key or nil
+end
+
 local function web_view_opts(ctx)
   local tol = ctx:tool_output_lines()
   return { max_lines = (tol and tol.web) or 3, keep = "head" }
@@ -33,8 +40,9 @@ end
 maki.api.register_tool({
   name = "websearch",
   kind = "fetch",
-  description = provider.description
-    .. "\n\n"
+  description = "Search the web for real-time information using "
+    .. provider.label
+    .. ".\n\n"
     .. "Today's date is "
     .. os.date("%Y-%m-%d")
     .. ".\n\n"
@@ -86,17 +94,18 @@ maki.api.register_tool({
 
     local max_lines, max_bytes = output_limits.resolve(opts, ctx)
 
-    local api_key = provider.api_key()
+    local key = api_key()
 
     local headers = {
       ["Content-Type"] = "application/json",
       ["Accept"] = "application/json, text/event-stream",
     }
-    for name, value in pairs(provider.headers(api_key)) do
-      headers[name] = value
+    if key then
+      headers[provider.auth_header] = (provider.auth_prefix or "") .. key
     end
+    local endpoint = provider.endpoint .. ((not key and provider.keyless_suffix) or "")
 
-    local resp, err = maki.net.request(provider.endpoint(api_key), {
+    local resp, err = maki.net.request(endpoint, {
       method = "POST",
       body = payload,
       headers = headers,
