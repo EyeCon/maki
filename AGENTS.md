@@ -38,7 +38,7 @@ Cheapest first, and scope to the crate you touched while iterating:
 - `just lint` - `cargo clippy --all --tests -- -D warnings`
 - `just test` - `cargo nextest run --workspace`
 
-Read `justfile` for more.
+Read `Makefile` for more.
 
 Dev builds skip debug info for deps and vendored C (our crates keep it); to debug into a dep set `[profile.dev.package.<name>] debug = true`.
 
