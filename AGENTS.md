@@ -36,7 +36,7 @@ Cheapest first, and scope to the crate you touched while iterating:
 
 - `make check` (or `cargo check -p <crate> --all-targets`)
 - `make lint` - `cargo clippy --all --all-targets -- -D warnings`
-- `make test` - `cargo nextest run --workspace`
+- `make test` - `cargo test --workspace`
 
 Read `Makefile` for more.
 

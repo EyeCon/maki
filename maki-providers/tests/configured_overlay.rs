@@ -44,6 +44,14 @@ const PLAN_KEY: &str = "coding";
 const PLAN_HOST: &str = "plan.overlaid.example";
 const PLAN_KEY_ENV: &str = "MAKI_TEST_PLANNED_PROVIDER_KEY";
 
+/// Serializes the cases: they point the process-wide home and config at their
+/// own tree, so under `cargo test`'s shared process one case would otherwise
+/// read another's `providers.toml`.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Points every base directory at a throwaway tree holding `providers.toml`,
 /// so no case reads this machine's config. The override pins the file to this
 /// case's own directory, so even a config dir memoized by an earlier test in
@@ -94,6 +102,7 @@ fn load_bundled() {
 #[test_case(LONE_KEY, DECLARED_URL ; "a_lone_key")]
 #[test_case(&own_definition(), CONFIGURED_URL ; "a_whole_definition")]
 fn an_entry_keeps_the_bundled_declaration(entry: &str, origin: &str) {
+    let _serial = serial();
     let _home = isolated(&format!("[{DECLARED_SLUG}]\n{entry}\n"));
     load_bundled();
 
@@ -112,6 +121,7 @@ fn an_entry_keeps_the_bundled_declaration(entry: &str, origin: &str) {
 /// user may never pick.
 #[test]
 fn a_bad_header_on_a_bundled_slug_fails_only_its_build() {
+    let _serial = serial();
     let _home = isolated(&format!(
         "[{DECLARED_SLUG}.headers]\n\"{GATEWAY_HEADER}\" = \"${{{UNSET_VAR}}}\"\n"
     ));
@@ -141,6 +151,7 @@ fn a_planned_origin_is_vouched_only_for_a_bundled_declaration(
     authority: DeclAuthority,
     vouched: bool,
 ) {
+    let _serial = serial();
     let _home = isolated(&format!("[{DECLARED_SLUG}]\nplan = \"{PLAN_KEY}\"\n"));
     let plan_url = format!("https://{PLAN_HOST}/v1");
     let mut reg = declaration(DECLARED_SLUG, DECLARED_DISPLAY_NAME, DECLARED_HOST);
@@ -172,6 +183,7 @@ fn a_planned_origin_is_vouched_only_for_a_bundled_declaration(
 /// plugin taking the same slug would be a second provider with the same name.
 #[test]
 fn a_slug_providers_toml_defines_is_still_refused() {
+    let _serial = serial();
     let _home = isolated(&format!("[{OWN_SLUG}]\n{}\n", own_definition()));
     plugin::begin_load();
     let error = plugin::register(
@@ -223,6 +235,7 @@ fn saved_catalog_key() -> TempDir {
 
 #[test]
 fn a_taken_over_slugs_saved_key_becomes_the_plugins() {
+    let _serial = serial();
     let _home = saved_catalog_key();
     let mut reg = declaration(CATALOG_SLUG, DECLARED_DISPLAY_NAME, DECLARED_HOST);
     reg.decl.api_key_env = Some(KEY_ENV.to_owned());
@@ -245,6 +258,7 @@ const LEGACY_WARNED: &str = "a legacy selection warns the user to migrate";
 
 #[test]
 fn a_legacy_plugin_selection_keeps_the_slug_owned() {
+    let _serial = serial();
     let _home = isolated(&format!("[{LEGACY_SLUG}]\nplugin = \"{LEGACY_PACKAGE}\"\n"));
 
     plugin::begin_load();

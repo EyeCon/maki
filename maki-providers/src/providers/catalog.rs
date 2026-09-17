@@ -12,6 +12,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard, RwLock};
 use std::time::{Duration, SystemTime};
 
 use maki_config::providers::ProvidersConfig;
@@ -482,9 +484,27 @@ static CATALOG_PROVIDER_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
 
 static SHARED_CATALOG: OnceCell<CatalogData> = OnceCell::const_new();
 
+/// A fixture installed by [`seed_catalog_for_tests`]. Tests share one process,
+/// so a seed outranks whatever the process warmed; a reseed leaks the old copy
+/// rather than invalidating references a test still holds.
+#[cfg(test)]
+static SEEDED_CATALOG: RwLock<Option<&'static CatalogData>> = RwLock::new(None);
+
+/// The warm catalog, a seeded fixture included.
+fn catalog_if_available() -> Option<&'static CatalogData> {
+    #[cfg(test)]
+    if let Some(seeded) = *SEEDED_CATALOG.read().unwrap_or_else(|e| e.into_inner()) {
+        return Some(seeded);
+    }
+    SHARED_CATALOG.get()
+}
+
 /// The catalog, loaded from the on-disk cache and fetched once if the cache
 /// is cold or stale. Concurrent first callers share the one fetch.
 pub(crate) async fn shared_catalog() -> &'static CatalogData {
+    if let Some(data) = catalog_if_available() {
+        return data;
+    }
     SHARED_CATALOG.get_or_init(init_catalog).await
 }
 
@@ -514,7 +534,7 @@ pub async fn catalog_providers() -> Vec<&'static ProviderData> {
 /// Returns the list of catalog providers only if the catalog has already been downloaded.
 /// Does NOT trigger downloading.
 pub fn catalog_providers_if_available() -> Option<Vec<&'static ProviderData>> {
-    SHARED_CATALOG.get().map(CatalogData::all_providers)
+    catalog_if_available().map(CatalogData::all_providers)
 }
 
 /// Returns the ProviderData for a specific catalog provider, if found.
@@ -525,7 +545,7 @@ pub async fn catalog_provider(provider_id: &str) -> Option<&'static ProviderData
 /// Non-blocking variant of [`catalog_provider`]: returns the `ProviderData` only
 /// if the catalog has already been downloaded. Never triggers a fetch.
 pub fn catalog_provider_if_available(provider_id: &str) -> Option<&'static ProviderData> {
-    SHARED_CATALOG.get()?.provider(provider_id)
+    catalog_if_available()?.provider(provider_id)
 }
 
 /// What a catalog provider's wire sends for `choice`. The messages wire
@@ -542,8 +562,7 @@ pub(crate) fn sends_if_available(slug: &str, choice: ThinkingConfig) -> Thinking
 /// The env var each catalog provider reads its key from, if one is set. A cold
 /// catalog gives nothing, because a fetch here would stall every spawn.
 pub(crate) fn key_vars_if_available() -> Vec<String> {
-    SHARED_CATALOG
-        .get()
+    catalog_if_available()
         .into_iter()
         .flat_map(|catalog| catalog.providers.values())
         .filter_map(ProviderData::env_key_set)
@@ -569,7 +588,7 @@ pub fn available_if_warm(slug: &str) -> bool {
 /// and never fetches: a catalog maki never cached is one it never offered a
 /// login for.
 pub(crate) fn serves_slug(slug: &str) -> bool {
-    if let Some(catalog) = SHARED_CATALOG.get() {
+    if let Some(catalog) = catalog_if_available() {
         return catalog.providers.contains_key(slug);
     }
     let Some(text) = catalog_cache_path().and_then(|path| fs::read_to_string(path).ok()) else {
@@ -956,14 +975,30 @@ impl Provider for CatalogProvider {
     }
 }
 
+/// Serializes catalog fixtures across the shared `cargo test` process: each
+/// seeder holds the lock until the caller drops the returned guard, so one
+/// test's seed cannot overwrite another's mid-assert.
 #[cfg(test)]
-pub(crate) fn seed_catalog_for_tests(index: schema::CatalogIndex, state_dir: StateDir) {
-    let _ = SHARED_CATALOG.set(CatalogData::from_index(index, &state_dir));
+static SEED_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+#[must_use = "holds the catalog seed lock for the rest of the test"]
+pub(crate) struct CatalogSeedGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+#[cfg(test)]
+pub(crate) fn seed_catalog_for_tests(
+    index: schema::CatalogIndex,
+    state_dir: StateDir,
+) -> CatalogSeedGuard {
+    let guard = SEED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let data = CatalogData::from_index(index, &state_dir);
+    *SEEDED_CATALOG.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::leak(Box::new(data)));
+    CatalogSeedGuard(guard)
 }
 
 #[cfg(test)]
-pub(crate) fn warm_empty_catalog_for_tests(state_dir: StateDir) {
-    seed_catalog_for_tests(HashMap::new(), state_dir);
+pub(crate) fn warm_empty_catalog_for_tests(state_dir: StateDir) -> CatalogSeedGuard {
+    seed_catalog_for_tests(HashMap::new(), state_dir)
 }
 
 /// Defers catalog resolution to first use so that provider construction
@@ -1040,7 +1075,7 @@ async fn create_resolved(slug: &str, timeouts: Timeouts) -> Result<CatalogProvid
 /// returns a [`LazyCatalogProvider`] instead of blocking on the fetch;
 /// membership is then checked on first use.
 pub fn try_create(slug: &str, timeouts: Timeouts) -> Option<Result<Box<dyn Provider>, AgentError>> {
-    if let Some(catalog) = SHARED_CATALOG.get() {
+    if let Some(catalog) = catalog_if_available() {
         let data = catalog.provider(slug)?;
         let state_dir = StateDir::resolve().ok()?;
         let allow_free_fallback = data.free_models_enabled();
@@ -1061,7 +1096,7 @@ pub fn try_create(slug: &str, timeouts: Timeouts) -> Option<Result<Box<dyn Provi
 /// (e.g. `Model::from_spec`) must tolerate `None` and fall through, since
 /// the catalog may still be warming in the background.
 pub(crate) fn model_meta_if_available(slug: &str, model_id: &str) -> Option<CatalogMeta> {
-    SHARED_CATALOG.get()?.model_meta(slug, model_id).cloned()
+    catalog_if_available()?.model_meta(slug, model_id).cloned()
 }
 
 /// True when the model belongs to a provider with a [`FreeTier`] and is free
@@ -1763,7 +1798,7 @@ mod tests {
                 models,
             },
         )]);
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
 
         let model = super::Model::from_spec(&format!("opencode/{model_id}")).unwrap();
         assert_eq!(model.is_free(), expected);
@@ -1793,7 +1828,7 @@ mod tests {
                 models,
             },
         )]);
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
 
         let model = super::Model::from_spec(&format!("opencode-go/{model_id}")).unwrap();
         assert_eq!(model.supports_vision(), expected);
@@ -1806,7 +1841,7 @@ mod tests {
     #[test]
     fn catalog_answers_only_for_models_the_static_table_misses() {
         let (_tmp, state_dir) = temp_state_dir();
-        super::seed_catalog_for_tests(builtin_catalog(), state_dir);
+        let _seed = super::seed_catalog_for_tests(builtin_catalog(), state_dir);
 
         let unlisted = Model::from_spec(&format!("{BUILTIN_SLUG}/{UNLISTED_MODEL}")).unwrap();
         assert_eq!(unlisted.pricing.input, UNLISTED_INPUT_PRICE);
@@ -1829,6 +1864,21 @@ mod tests {
         assert_eq!(Some(listed.context_window), curated.context_window);
     }
 
+    /// `OnceLock::set` is one-shot, so a seed after any earlier warm used to be
+    /// dropped silently and the next test read the stale catalog. Reseeding
+    /// must replace the contents in place.
+    #[test]
+    fn seed_replaces_an_already_warmed_catalog() {
+        let (_tmp_empty, empty_dir) = temp_state_dir();
+        drop(super::warm_empty_catalog_for_tests(empty_dir));
+
+        let (_tmp, state_dir) = temp_state_dir();
+        let _seed = super::seed_catalog_for_tests(builtin_catalog(), state_dir);
+
+        let unlisted = Model::from_spec(&format!("{BUILTIN_SLUG}/{UNLISTED_MODEL}")).unwrap();
+        assert_eq!(unlisted.pricing.input, UNLISTED_INPUT_PRICE);
+    }
+
     /// Curated rows match by prefix, so `grok-4.6` answers for every id
     /// starting with it. That guess loses to models.dev naming the exact model,
     /// or the next release in an existing family bills at its predecessor's
@@ -1837,7 +1887,7 @@ mod tests {
     #[test]
     fn a_relative_matched_by_prefix_loses_to_the_catalog_naming_the_model() {
         let (_tmp, state_dir) = temp_state_dir();
-        super::seed_catalog_for_tests(builtin_catalog(), state_dir);
+        let _seed = super::seed_catalog_for_tests(builtin_catalog(), state_dir);
         let curated = curated_row();
 
         let sibling = Model::from_spec(&format!("{BUILTIN_SLUG}/{}", sibling_model())).unwrap();
@@ -1872,7 +1922,7 @@ mod tests {
     #[test]
     fn fields_the_catalog_omits_fall_through() {
         let (_tmp, state_dir) = temp_state_dir();
-        super::seed_catalog_for_tests(builtin_catalog(), state_dir);
+        let _seed = super::seed_catalog_for_tests(builtin_catalog(), state_dir);
         let curated = curated_row();
         let spec = ProviderRegistry::for_slug(BUILTIN_SLUG).unwrap();
 
@@ -1900,7 +1950,7 @@ mod tests {
             "@ai-sdk/openai-compatible",
             Some(BUILTIN_BASE_URL),
         );
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
 
         let spec = ProviderRegistry::for_slug(BUILTIN_SLUG).unwrap();
         let model = Model::from_spec(&format!("{BUILTIN_SLUG}/{UNLISTED_MODEL}")).unwrap();
@@ -2124,7 +2174,7 @@ mod tests {
     #[test]
     fn catalog_miss_falls_back_to_family() {
         let (_tmp, state_dir) = temp_state_dir();
-        super::warm_empty_catalog_for_tests(state_dir);
+        let _seed = super::warm_empty_catalog_for_tests(state_dir);
 
         let model = super::Model::from_spec("opencode-go/unlisted-model").unwrap();
         assert!(!model.supports_vision());
@@ -2153,7 +2203,7 @@ mod tests {
                 models,
             },
         )]);
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
         crate::model_registry::set_known_models(
             "opencode-go",
             vec![ModelInfo {
@@ -2828,7 +2878,12 @@ mod tests {
     }
 
     #[test]
-    fn available_if_warm_returns_false_when_catalog_cold() {
+    fn available_if_warm_returns_false_without_the_slug() {
+        // `SHARED_CATALOG` is a one-shot in the shared `cargo test` process, so
+        // "cold" is unreproducible after the first seed; a warm catalog that
+        // lacks the slug takes the same no-data exit.
+        let (_tmp, state_dir) = temp_state_dir();
+        let _seed = super::warm_empty_catalog_for_tests(state_dir);
         assert!(!available_if_warm("opencode-go"));
     }
 }
