@@ -1,0 +1,6 @@
+[bash]
+allow = [
+  "cargo test *",
+  "grep *"
+]
+
