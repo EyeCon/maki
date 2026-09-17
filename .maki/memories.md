@@ -108,6 +108,27 @@
   path read (`maki models` exits 2) — decisive proof of which file was loaded; custom
   provider + missing `api_key_env` error is the positive-path probe.
 
+## Test infrastructure (maki-providers, added 2026-09-17)
+
+- `spawn_mock_endpoint` (openai_compat.rs tests; a GET-only variant lives in
+  openrouter.rs tests): one-shot `TcpListener` on `127.0.0.1:0` that reads one
+  request (head + content-length body), reports `(path, parsed body)` over a
+  channel, replies with a fixed response. `ResolvedAuth::for_test(base_url,
+  headers)` points a provider at it; base_url on auth wins over everything.
+- Wire regression tests pinned this way: `do_stream_sends_the_wire_body`
+  (xwzy: the socket body is `wire_body`'s output), the OpenRouter
+  `list_models_queries_the_key_filtered_endpoint` test (rztk: hits
+  `/models/user`), policy shapes (`merge_extra_combines_shapes`,
+  remove-without-extra-body), and `log_wire_body` capture (puzm:
+  `tracing_subscriber` + `with_default` + a `LogCapture` MakeWriter; the two
+  env-setting tests share a `WIRE_LOG_ENV` mutex so `MAKI_LOG_WIRE` flips
+  stay ordered in the shared process).
+- lyzv: `nim_extension_resolves_and_parses` in maki-lua/src/language.rs pins
+  nim/nims/nimble → `Language::Nim`.
+- The bash tool's `workdir` param is unreliable in this env — it kept the repo
+  root as cwd and one `cargo run` nearly clobbered `src/main.rs`. Always
+  prefix `cd <dir> &&` or use `--manifest-path`.
+
 ## Environment / testing
 
 - `stylua`, `nix` not installed in this env (as of 2026-08-28); CI runs `stylua --check
@@ -139,3 +160,14 @@
   `plugins/index/tests/spec.lua` (alphabetized); runs as one Rust test per plugin via
   `maki-lua/tests/spec.rs` include_str!.
 - Bundled plugins are compiled into the binary → `cargo build` required after lua edits.
+
+## Local stack layout (post-rebase 2026-09-17)
+
+- Three parallel branches sit on `main`, merged by `xxly` ("merge:
+  feat-nim-support + feat-extra-body"), followed by `ztzs` (adapt-ci) →
+  `kosv` (Update memories) → `xlwm` (Replace justfile with Makefile):
+  `feat-extra-body` = xwzy → kmyk → puzm, `feat-nim-support` = lyzv (Nim
+  indexing), plus `feat-filter-models` = rztk (OpenRouter `/models/user`,
+  kept as a third parent of the merge). The upstream-equivalent parts of
+  rztk's path parameterization were resolved into `MODELS_PATH` style during
+  the rebase; its net diff is only the OpenRouter endpoint change.
