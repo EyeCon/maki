@@ -110,8 +110,9 @@
 
 ## Environment / testing
 
-- `nextest`, `just`, `stylua`, `nix` not installed in this env (as of 2026-08-28); use
-  `cargo test`, read justfile recipes directly. CI runs `stylua --check plugins/`.
+- `stylua`, `nix` not installed in this env (as of 2026-08-28); CI runs `stylua --check
+  plugins/`. Tests run via `make test` (plain `cargo test`; nextest was dropped
+  2026-09-17). Build recipes live in the `Makefile`.
 - maki-providers model tests (`model::tests::discovered_*`, `catalog::tests`) are flaky
   — they race on globals (`set_known_models`, `SHARED_CATALOG` OnceLock in
   `catalog.rs` whose first init reads the real user config + on-disk cache, racing
@@ -119,6 +120,10 @@
   2 fail parallel, 1 single-threaded (`catalog::…::free_opencode_model_is_free`);
   `model::tests::discovered_pricing_decides_free::priced_is_not_free` fails even solo
   on this machine. Unrelated to feature work.
+- maki-pack `manager::tests::{apply_update_rejects_*, lockfile_restore_acts_*,
+  update_is_prepared_*, dropping_the_lock_entry_*}` flake under parallel cargo test
+  with `Lock(Held { .. })` on their own unique temp paths; pass with
+  `--test-threads=1` and solo. Confirmed identical on pristine main (2026-09-17).
 - More pre-existing flakes, both confirmed failing on pristine main (2026-09-05):
   maki-lua `pack::tests::update_review_*` / `applied_update_records_*` (varying
   failures per run, pass solo; "locked by another Maki process" staleness) and

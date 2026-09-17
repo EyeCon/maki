@@ -1485,7 +1485,7 @@ pub(crate) fn with_task_bufs<R>(lua: &Lua, f: impl FnOnce(&mut BufferStore) -> R
 }
 
 /// A working wake lands in microseconds, so this is only about failing in
-/// seconds instead of parking until nextest gives up on the suite.
+/// seconds instead of parking until the test runner gives up on the suite.
 #[cfg(test)]
 const TEST_WAKE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]

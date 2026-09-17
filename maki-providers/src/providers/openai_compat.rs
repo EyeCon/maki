@@ -1601,8 +1601,7 @@ data: [DONE]\n";
                         let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
                         body.extend_from_slice(&buf[..n]);
                     }
-                    let parsed: Value =
-                        serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
                     let _ = hits.send((path, parsed));
                     std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
                     return;
@@ -1626,15 +1625,13 @@ data: [DONE]\n\n";
     fn do_stream_sends_the_wire_body() {
         let (hits_tx, hits_rx) = std::sync::mpsc::channel();
         let port = spawn_mock_endpoint(
-            format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{STREAM_OK_SSE}"),
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{STREAM_OK_SSE}"
+            ),
             hits_tx,
         );
-        let compat = compat_with_extra(extra_body(&[(
-            "preset",
-            json!("email-copywriter"),
-        )]));
-        let auth =
-            ResolvedAuth::for_test(Some(format!("http://127.0.0.1:{port}")), Vec::new());
+        let compat = compat_with_extra(extra_body(&[("preset", json!("email-copywriter"))]));
+        let auth = ResolvedAuth::for_test(Some(format!("http://127.0.0.1:{port}")), Vec::new());
         let model = test_model();
         let (tx, rx) = flume::unbounded();
         smol::block_on(async {

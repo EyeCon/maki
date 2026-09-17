@@ -4407,11 +4407,9 @@ mod tests {
     }
 
     // Setting an environment variable is only sound while no other thread
-    // reads the environment at the same time, and the test runner is what
-    // holds that up: `just test` runs `cargo nextest`, which gives every test
-    // its own process. Under plain `cargo test` these tests share one process
-    // with every other test and the invariant is gone, so the unique variable
-    // names below help but do not make it safe.
+    // reads the environment at the same time. `cargo test` runs every test in
+    // one shared process and gives no such guarantee, so the unique variable
+    // names below keep these tests from stomping on each other's values.
 
     #[test]
     fn expand_env_literal_text_passes_through() {

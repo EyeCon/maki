@@ -132,7 +132,8 @@ fn setup() -> (Arc<ToolRegistry>, PluginHost) {
 }
 
 /// `maki.agent.tools` describes the process-wide registry, so the fixtures have
-/// to land there. Safe: nextest runs each test in its own process.
+/// to land there. Only one test in this binary uses the global registry, so
+/// they cannot collide even when `cargo test` runs every test in one process.
 fn setup_global() -> (Arc<ToolRegistry>, PluginHost) {
     setup_with(Arc::clone(ToolRegistry::global_arc()))
 }

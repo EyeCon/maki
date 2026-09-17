@@ -765,8 +765,8 @@ tier = "{input}"
         let slug = "maki-test-env-base-url-slug";
         let env_var = base_url_env_var(slug);
         // SAFETY: setting a variable is only sound while no other thread reads
-        // the environment, and the runner is what holds that up: `just test`
-        // runs `cargo nextest`, which gives every test its own process.
+        // the environment. `cargo test` shares one process across tests, so
+        // the unique slug-scoped name keeps other tests off this value.
         unsafe {
             std::env::set_var(&env_var, "http://env.local/v1");
         }
@@ -775,7 +775,7 @@ tier = "{input}"
             ..Default::default()
         };
         let got = resolve_base_url(slug, Some(&def));
-        // SAFETY: same one process per test rule as above.
+        // SAFETY: same shared-process rule as above.
         unsafe {
             std::env::remove_var(&env_var);
         }

@@ -495,13 +495,13 @@ mod tests {
 
         let prev = std::env::var_os("XDG_CONFIG_HOME");
         // SAFETY: setting a variable is only sound while no other thread reads
-        // the environment, and the runner is what holds that up: `just test`
-        // runs `cargo nextest`, which gives every test its own process.
+        // the environment. `cargo test` shares one process across tests, so
+        // the save/restore below keeps other tests off this value.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", hostile.path()) };
 
         let dirs = config_search_dirs_from(Some(home_a.path()), Some(&xdg_a));
 
-        // SAFETY: same one process per test rule as above.
+        // SAFETY: same shared-process rule as above.
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
