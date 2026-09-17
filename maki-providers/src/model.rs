@@ -1520,6 +1520,7 @@ mod tests {
     #[test_case(SCHEDULED_SPEC ; "priced_and_scheduled")]
     #[test_case(UNPRICED_SCHEDULED_SPEC ; "unpriced")]
     fn a_reported_cost_is_the_whole_answer(spec: &str) {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         let model = Model::from_spec(spec).unwrap();
         let billed = TokenUsage {
@@ -1707,6 +1708,7 @@ mod tests {
     #[test_case("ollama/my-custom-model", "ollama", "my-custom-model" ; "unknown_ollama_model_accepted")]
     #[test_case(UNPRICED_SCHEDULED_SPEC, SCHEDULED_SLUG, "my-custom-model" ; "unknown_declared_model_accepted")]
     fn unknown_model_accepted(spec: &str, expected_slug: &str, expected_id: &str) {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         let model = Model::from_spec(spec).unwrap();
         assert_eq!(model.provider, Arc::<str>::from(expected_slug));
@@ -1746,6 +1748,7 @@ mod tests {
     #[test_case("anthropic/claude-nonexistent-99",  true  ; "unknown_model_uses_family_fallback")]
     #[test_case(UNPRICED_SCHEDULED_SPEC,            false ; "unknown_generic_defaults_off")]
     fn vision_resolved_from_entry_or_family(spec: &str, expected: bool) {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         assert_eq!(Model::from_spec(spec).unwrap().supports_vision(), expected);
     }
@@ -1948,6 +1951,7 @@ mod tests {
     #[test_case(SCHEDULED_SPEC,                        Some(false) ; "priced_is_not_free")]
     #[test_case(UNPRICED_SCHEDULED_SPEC,               None        ; "no_price_table_is_unknown")]
     fn free_separates_zero_from_unknown(spec: &str, expected: Option<bool>) {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         assert_eq!(Model::from_spec(spec).unwrap().free(), expected);
     }
@@ -1977,6 +1981,7 @@ mod tests {
     /// re-prices old turns and nobody knows what hour those ran at.
     #[test]
     fn a_declared_schedule_bills_its_surcharge_on_top_of_the_table() {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         let model = Model::from_spec(SCHEDULED_SPEC).unwrap();
 
@@ -1999,6 +2004,7 @@ mod tests {
     /// zero lands in the same place, which is where it has always been.
     #[test]
     fn unpriced_models_stay_unpriced_under_a_schedule() {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         let model = Model::from_spec(UNPRICED_SCHEDULED_SPEC).unwrap();
         let free = TokenUsage {
@@ -2256,6 +2262,7 @@ mod tests {
     /// reference, so "covered by the subscription" and "free" read apart.
     #[test]
     fn subsidised_pricing_bills_zero_and_keeps_the_list_price() {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         let mut model = Model::from_spec(UNPRICED_SCHEDULED_SPEC).unwrap();
         model.pricing = PAID_PRICING;
@@ -2271,6 +2278,7 @@ mod tests {
     /// zero rates there is nothing to reference, so both costs stay `None`.
     #[test]
     fn subsidised_but_unpriced_model_stays_unpriced() {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         let mut model = Model::from_spec(UNPRICED_SCHEDULED_SPEC).unwrap();
         assert!(model.pricing.is_zero());
@@ -2283,6 +2291,7 @@ mod tests {
     /// figure only appears next to a subsidised `$0` bill.
     #[test]
     fn metered_model_has_no_subsidised_list_cost() {
+        let _serial = crate::test_support::serial();
         register_scheduled();
         let model = Model::from_spec(SCHEDULED_SPEC).unwrap();
         assert!(model.billed_cost(&INPUT_ONLY, false).is_some());

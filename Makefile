@@ -17,7 +17,7 @@ install:
 	cargo install --locked --path . $(ARGS)
 
 test:
-	cargo nextest run --workspace $(ARGS)
+	cargo test --workspace $(ARGS)
 
 lint:
 	cargo clippy --all --all-targets -- -D warnings
