@@ -945,7 +945,7 @@ mod tests {
             extra_body_policy: Some(Default::default()),
             ..Default::default()
         };
-        assert!(maki_config::providers::ignored_builtin_fields("openrouter", &def).is_empty());
+        assert!(maki_config::providers::ignored_builtin_fields("ollama", &def).is_empty());
         assert_eq!(
             maki_config::providers::ignored_builtin_fields("anthropic", &def),
             ["extra_body", "extra_body_policy"]

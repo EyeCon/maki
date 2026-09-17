@@ -1302,6 +1302,7 @@ mod tests {
         #[test_case(&["host:5000/team/model"], "host:5000/team/model:latest", Some(SERVED) ; "port_is_not_a_tag")]
         #[test_case(&[], "llama3.2", None ; "nothing_loaded")]
         fn matches_loaded_model(loaded: &[&str], model_id: &str, expected: Option<u32>) {
+            let _serial = crate::test_support::serial();
             assert_eq!(ollama_served_window(&served(loaded), model_id), expected);
         }
 
@@ -1325,6 +1326,7 @@ mod tests {
             script: &'static [Canned],
             expected: Option<u32>,
         ) {
+            let _serial = crate::test_support::serial();
             const ID: &str = "llama3.2";
             model_registry::set_known_models(OLLAMA_SLUG, vec![ModelInfo::id_only(ID.into())]);
             let (ep, _) = endpoint(&OLLAMA, script);

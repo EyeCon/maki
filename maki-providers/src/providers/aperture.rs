@@ -533,6 +533,7 @@ mod tests {
     #[test_case("aperture", None ; "aperture_no_recurse")]
     #[test_case("gemini", None ; "gemini_vendor_unparsable_without_override")]
     fn routed_spec_without_overrides(provider_id: &str, expected: Option<&str>) {
+        let _serial = crate::test_support::serial();
         register_routed();
         assert_eq!(spec_slug(provider_id, &OverrideFields::default()), expected);
     }
@@ -597,6 +598,7 @@ mod tests {
         base: Option<&str>,
         expected: Option<Effort>,
     ) {
+        let _serial = crate::test_support::serial();
         register_routed();
         let model = Model::from_spec(spec).unwrap();
         let vendor = model.id.split_once('/').unwrap().0;
@@ -644,6 +646,7 @@ mod tests {
     #[test_case(Some("google"), Some("https://aperture.example.com/v1beta") ; "google_appends_v1beta")]
     #[test_case(Some("anthropic"), Some("https://aperture.example.com") ; "anthropic_keeps_bare_host")]
     fn routed_auth_prefix_per_route(slug: Option<&str>, expected: Option<&str>) {
+        let _serial = crate::test_support::serial();
         register_routed();
         let prefix = path_prefix(slug.map(route), &OverrideFields::default());
         let auth = routed_auth(&test_auth(), &prefix);
@@ -790,6 +793,7 @@ mod tests {
 
     #[test]
     fn apply_adjustments_vision_uses_routed_static_table() {
+        let _serial = crate::test_support::serial();
         register_routed();
         let spec = format!("aperture/{ROUTED_SLUG}/{ROUTED_VISION_MODEL}");
         let mut model = Model::from_spec(&spec).unwrap();
@@ -823,6 +827,7 @@ mod tests {
 
     #[test]
     fn apply_adjustments_vision_override_disables_static_vision_model() {
+        let _serial = crate::test_support::serial();
         register_routed();
         let mut overrides = Overrides::new();
         overrides.insert(
@@ -860,6 +865,7 @@ mod tests {
     #[test_case(ROUTED_CHAT_SPEC, true ; "routed_thinking_capable")]
     #[test_case("aperture/ollama/qwen3", false ; "routed_non_thinking")]
     fn apply_adjustments_thinking_follows_routed_spec(spec: &str, expected: bool) {
+        let _serial = crate::test_support::serial();
         register_routed();
         let mut model = Model::from_spec(spec).unwrap();
         assert!(model.thinking_override.is_none());
@@ -912,6 +918,7 @@ mod tests {
 
     #[test]
     fn apply_adjustments_thinking_override_disables_routed_capable_model() {
+        let _serial = crate::test_support::serial();
         register_routed();
         let mut overrides = Overrides::new();
         overrides.insert(

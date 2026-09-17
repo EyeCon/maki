@@ -237,6 +237,15 @@ pub fn sse_event(event: &str, data: &Value) -> String {
     format!("event: {event}\ndata: {data}\n\n")
 }
 
+/// Serializes the tests that share the process-wide provider registry, its
+/// grants and credential cells. `cargo test` runs every test in one process,
+/// so one test's `begin_load` would otherwise wipe a neighbour's registrations
+/// mid-assert. Hold the guard for the whole test.
+pub fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// What the transport tests in `http` and `error` fail against: a port that
 /// refuses, a port that cannot complete a TLS handshake, a name that cannot
 /// resolve, and a secret that must never reach a message.
