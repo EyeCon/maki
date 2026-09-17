@@ -65,7 +65,7 @@ mod tests {
     use crate::components::code_view::SectionFlags;
 
     /// The highlight pool is process-global and shared with every other test in
-    /// this binary, so a job can queue behind unrelated work under nextest.
+    /// this binary, so a job can queue behind unrelated work.
     const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
     const OUTPUT_LIMIT: usize = 64;
     const NO_RESULT: &str = "shared pool never returned the job";
