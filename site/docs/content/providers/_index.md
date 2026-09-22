@@ -209,7 +209,6 @@ Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` to your
 
 Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
 
-\\\\\\\        to: xwzyxtxr 72b62e63 "feat(providers): inject extra body fields into API requests" (rebased revision)
  ### DeepSeek
  
  - **Env var**: `DEEPSEEK_API_KEY`
@@ -230,8 +229,7 @@ Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
  - **API**: `https://openrouter.ai/api/v1`
  - **Features**: 300+ models from all providers, prompt caching, provider routing
  
--OpenRouter aggregates models from many providers behind a single API key. Browse available models at [openrouter.ai/models](https://openrouter.ai/models). Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`).
-+OpenRouter aggregates models from many providers behind a single API key. Browse available models at [openrouter.ai/models](https://openrouter.ai/models). Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`), including preset references (e.g. `openrouter/@preset/my-slug`). Set `extra_body.preset` under `[openrouter]` in providers.toml to attach a preset while keeping an explicit model.
+OpenRouter aggregates models from many providers behind a single API key. Browse available models at [openrouter.ai/models](https://openrouter.ai/models). Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`), including preset references (e.g. `openrouter/@preset/my-slug`). Set `extra_body.preset` under `[openrouter]` in providers.toml to attach a preset while keeping an explicit model.
  
  ### Requesty
  
@@ -501,7 +499,13 @@ supports_vision = false
 | `models` | array | Declared models for custom providers (see below) |
 | `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
 | `extra_body` | table | OpenAI-compat providers. JSON fields merged into every request body, overriding fields maki computes (e.g. `preset = "my-slug"` for an OpenRouter preset) |
-| `extra_body_policy` | table | OpenAI-compat providers. How each `extra_body` key combines with the field maki computes: `merge` (objects merge recursively, arrays concatenate, scalars replace), `replace` (default), or `remove` (delete the computed field; a configured value is ignored) |
+| `extra_body_policy` | table | OpenAI-compat providers. How each `extra_body` key combines with the field maki computes: `merge` (objects merge recursively, arrays keep maki's items and append yours, scalars replace), `replace` (default), or `remove` (delete the computed field, a configured value under that key is ignored) |
+
+With `merge`, arrays only grow: maki's items stay first and yours follow. To drop or reorder the computed list, use `replace`.
+
+### Debugging request bodies
+
+To log the exact JSON maki sends (after `extra_body` merging), start it with `MAKI_LOG_WIRE=1` and `MAKI_LOG=debug`. Each request writes one `wire request body` line with the endpoint and the full body to `maki.log` (same file as plugin logs, see [Plugins](/docs/plugins/#development-loop)). The body includes full prompts, so leave the flag off in normal use.
 
 ### Model fields
 
