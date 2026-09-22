@@ -110,9 +110,6 @@ irm https://maki.sh/install.ps1 | iex
 # Homebrew
 brew install maki
 
-# Nix
-nix run github:tontinton/maki
-
 # Living on the edge (main branch)
 cargo install --locked --git https://github.com/tontinton/maki.git maki
 ```
