@@ -69,12 +69,17 @@
   array-of-tables lands at `extra_body.provider`, not inside the last tool
   element; a bare `[...tools]` table header after the array-of-tables is a TOML
   error).
-- Verification recipe, easiest first: (1) `MAKI_LOG_WIRE=1 RUST_LOG=debug` logs
+- Verification recipe, easiest first: (1) `MAKI_LOG_WIRE=1 MAKI_LOG=debug` logs
   the full serialized request body at the send sites into
   `~/.local/logs/maki/maki.log` (added 2026-09-05: `log_wire_body` in
   providers/mod.rs, wired at openai_compat chat_completions, openai responses,
   anthropic messages, google streamGenerate; body contains prompts — opt-in
-  debug only). (2) `--print --verbose` / stream-json for logical turn-by-turn;
+  debug only). Documented for users 2026-09-22 in the generated providers page
+  ("Debugging request bodies", gen_providers.rs) with `MAKI_LOG=debug` (the
+  default filter is info, so the env flag alone is not enough) and a
+  cross-link to the plugins development-loop section. `merge` array wording in
+  the same page and in rustdoc now says append (computed first, extra last),
+  not bare "concatenate". (2) `--print --verbose` / stream-json for logical turn-by-turn;
   session `.jsonl` files under `~/.local/state/maki/sessions/`. (3)
   `OPENROUTER_BASE_URL=http://127.0.0.1:PORT/v1` env override pointing at a
   local capture server that dumps POST bodies and answers with a minimal SSE

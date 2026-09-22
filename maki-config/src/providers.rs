@@ -257,9 +257,10 @@ pub struct ProviderDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<BTreeMap<String, serde_json::Value>>,
     /// Per-key policy for `extra_body`: `merge` combines with the computed
-    /// value (objects merge recursively, arrays concatenate, scalars
-    /// replace), `remove` deletes the computed field (ignoring any
-    /// configured value), default `replace` overwrites it.
+    /// value (objects merge recursively, arrays keep the computed items and
+    /// append the configured ones, scalars replace), `remove` deletes the
+    /// computed field (ignoring any configured value), default `replace`
+    /// overwrites it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body_policy: Option<BTreeMap<String, ExtraBodyPolicy>>,
 }

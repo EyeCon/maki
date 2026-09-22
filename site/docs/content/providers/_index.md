@@ -417,7 +417,13 @@ supports_vision = false
 | `models` | array | Declared models for custom providers (see below) |
 | `overrides` | table | Aperture only. Per-upstream model overrides (see below) |
 | `extra_body` | table | OpenAI-compat providers. JSON fields merged into every request body, overriding fields maki computes (e.g. `preset = "my-slug"` for an OpenRouter preset) |
-| `extra_body_policy` | table | OpenAI-compat providers. How each `extra_body` key combines with the field maki computes: `merge` (objects merge recursively, arrays concatenate, scalars replace), `replace` (default), or `remove` (delete the computed field; a configured value is ignored) |
+| `extra_body_policy` | table | OpenAI-compat providers. How each `extra_body` key combines with the field maki computes: `merge` (objects merge recursively, arrays keep maki's items and append yours, scalars replace), `replace` (default), or `remove` (delete the computed field, a configured value under that key is ignored) |
+
+With `merge`, arrays only grow: maki's items stay first and yours follow. To drop or reorder the computed list, use `replace`.
+
+### Debugging request bodies
+
+To log the exact JSON maki sends (after `extra_body` merging), start it with `MAKI_LOG_WIRE=1` and `MAKI_LOG=debug`. Each request writes one `wire request body` line with the endpoint and the full body to `maki.log` (same file as plugin logs, see [Plugins](/docs/plugins/#development-loop)). The body includes full prompts, so leave the flag off in normal use.
 
 ### Model fields
 

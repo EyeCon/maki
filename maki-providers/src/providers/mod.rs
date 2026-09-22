@@ -52,9 +52,10 @@ fn bearer_value(api_key: &str) -> String {
     format!("{BEARER_PREFIX}{api_key}")
 }
 
-/// Logs the serialized request body when `MAKI_LOG_WIRE=1`, so the exact JSON
-/// maki sends (after `extra_body` merging) lands in `maki.log` without a
-/// proxying capture server. Contains full prompts; debug-only and opt-in.
+/// Logs the serialized request body when `MAKI_LOG_WIRE=1` and the filter
+/// keeps `debug` (`MAKI_LOG=debug`), so the exact JSON maki sends (after
+/// `extra_body` merging) lands in `maki.log` without a proxying capture
+/// server. Contains full prompts; opt-in only.
 pub(crate) fn log_wire_body(endpoint: &str, json_body: &[u8]) {
     if std::env::var("MAKI_LOG_WIRE").is_ok_and(|v| v == "1")
         && let Ok(text) = std::str::from_utf8(json_body)

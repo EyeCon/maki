@@ -65,7 +65,8 @@ pub(crate) struct OpenAiCompatProvider {
 }
 
 /// Recursively merges `extra` into `computed`: objects merge key-wise, arrays
-/// concatenate, anything else (scalars and type mismatches) takes `extra`.
+/// keep `computed`'s items and append `extra`'s, anything else (scalars and
+/// type mismatches) takes `extra`.
 fn merge_extra(computed: &mut Value, extra: &Value) {
     match extra {
         Value::Object(extra) => match computed {
@@ -123,8 +124,9 @@ impl OpenAiCompatProvider {
 
     /// The body sent on the wire: the provider-built body with `extra_body`
     /// fields applied per `extra_body_policy` — `merge` combines with the
-    /// computed value (objects merge recursively, arrays concatenate, scalars
-    /// replace), `remove` deletes it, default `replace` overwrites it.
+    /// computed value (objects merge recursively, arrays keep the computed
+    /// items and append the configured ones, scalars replace), `remove`
+    /// deletes it, default `replace` overwrites it.
     pub(crate) fn wire_body(&self, body: &Value) -> Value {
         let mut merged = body.clone();
         if let Some(extra) = &self.extra_body {
