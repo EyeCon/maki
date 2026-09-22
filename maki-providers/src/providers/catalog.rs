@@ -450,18 +450,29 @@ pub fn warm_catalog() {
     init_shared_catalog_if_needed();
 }
 
+/// Overwrites the shared catalog, installing it first when cold. Losing the
+/// `set` race still lands the data: the winner's mutex is filled in place, so
+/// a reseed is never silently dropped (`OnceLock::set` is one-shot).
+fn replace_shared_catalog(data: CatalogData) {
+    match SHARED_CATALOG.set(Mutex::new(data)) {
+        Ok(()) => {}
+        Err(mutex) => {
+            let data = mutex.into_inner().expect("freshly built mutex is unlocked");
+            let existing = SHARED_CATALOG
+                .get()
+                .expect("set failed => already installed");
+            *existing.lock().unwrap_or_else(|e| e.into_inner()) = data;
+        }
+    }
+}
+
 /// Force-refetches the models.dev catalog; failures keep the stale catalog and cache.
 /// Blocks, so only call it from startup paths, never from inside the executor.
 pub fn refresh_catalog() -> Result<(), AgentError> {
     let state_dir = StateDir::resolve()
         .map_err(|e| config_error(format!("failed to resolve state dir: {e}")))?;
     let data = fetch_catalog_blocking(&state_dir)?;
-    match SHARED_CATALOG.get() {
-        Some(catalog) => *catalog.lock().unwrap() = data,
-        // Set instead of `get_or_init` so a cold catalog takes the fetch we just
-        // did rather than kicking off `init_catalog_blocking` and fetching twice.
-        None => drop(SHARED_CATALOG.set(Mutex::new(data))),
-    }
+    replace_shared_catalog(data);
     Ok(())
 }
 
@@ -904,14 +915,29 @@ impl Provider for CatalogProvider {
     }
 }
 
+/// Serializes catalog fixtures across the shared `cargo test` process: each
+/// seeder holds the lock until the caller drops the returned guard, so one
+/// test's seed cannot overwrite another's mid-assert.
 #[cfg(test)]
-pub(crate) fn seed_catalog_for_tests(index: schema::CatalogIndex, state_dir: StateDir) {
-    let _ = SHARED_CATALOG.set(Mutex::new(CatalogData::from_index(index, &state_dir)));
+static SEED_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+#[must_use = "holds the catalog seed lock for the rest of the test"]
+pub(crate) struct CatalogSeedGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+#[cfg(test)]
+pub(crate) fn seed_catalog_for_tests(
+    index: schema::CatalogIndex,
+    state_dir: StateDir,
+) -> CatalogSeedGuard {
+    let guard = SEED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    replace_shared_catalog(CatalogData::from_index(index, &state_dir));
+    CatalogSeedGuard(guard)
 }
 
 #[cfg(test)]
-pub(crate) fn warm_empty_catalog_for_tests(state_dir: StateDir) {
-    seed_catalog_for_tests(HashMap::new(), state_dir);
+pub(crate) fn warm_empty_catalog_for_tests(state_dir: StateDir) -> CatalogSeedGuard {
+    seed_catalog_for_tests(HashMap::new(), state_dir)
 }
 
 /// Defers catalog resolution to first use so that provider construction
@@ -1629,7 +1655,7 @@ mod tests {
                 models,
             },
         )]);
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
 
         let model = super::Model::from_spec(&format!("opencode/{model_id}")).unwrap();
         assert_eq!(model.is_free(), expected);
@@ -1659,7 +1685,7 @@ mod tests {
                 models,
             },
         )]);
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
 
         let model = super::Model::from_spec(&format!("opencode-go/{model_id}")).unwrap();
         assert_eq!(model.supports_vision(), expected);
@@ -1672,7 +1698,7 @@ mod tests {
     #[test]
     fn catalog_answers_only_for_models_the_static_table_misses() {
         let (_tmp, state_dir) = temp_state_dir();
-        super::seed_catalog_for_tests(builtin_catalog(), state_dir);
+        let _seed = super::seed_catalog_for_tests(builtin_catalog(), state_dir);
 
         let unlisted = Model::from_spec(&format!("{BUILTIN_SLUG}/{UNLISTED_MODEL}")).unwrap();
         assert_eq!(unlisted.pricing.input, UNLISTED_INPUT_PRICE);
@@ -1692,6 +1718,21 @@ mod tests {
         assert_eq!(listed.context_window, curated.context_window);
     }
 
+    /// `OnceLock::set` is one-shot, so a seed after any earlier warm used to be
+    /// dropped silently and the next test read the stale catalog. Reseeding
+    /// must replace the contents in place.
+    #[test]
+    fn seed_replaces_an_already_warmed_catalog() {
+        let (_tmp_empty, empty_dir) = temp_state_dir();
+        drop(super::warm_empty_catalog_for_tests(empty_dir));
+
+        let (_tmp, state_dir) = temp_state_dir();
+        let _seed = super::seed_catalog_for_tests(builtin_catalog(), state_dir);
+
+        let unlisted = Model::from_spec(&format!("{BUILTIN_SLUG}/{UNLISTED_MODEL}")).unwrap();
+        assert_eq!(unlisted.pricing.input, UNLISTED_INPUT_PRICE);
+    }
+
     /// Curated rows match by prefix, so `deepseek-flash` answers for every id
     /// starting with it. That guess loses to models.dev naming the exact model,
     /// or the next release in an existing family bills at its predecessor's
@@ -1700,7 +1741,7 @@ mod tests {
     #[test]
     fn a_relative_matched_by_prefix_loses_to_the_catalog_naming_the_model() {
         let (_tmp, state_dir) = temp_state_dir();
-        super::seed_catalog_for_tests(builtin_catalog(), state_dir);
+        let _seed = super::seed_catalog_for_tests(builtin_catalog(), state_dir);
         let curated = &deepseek::SPEC.models()[0];
 
         let sibling = Model::from_spec(&format!("{BUILTIN_SLUG}/{}", sibling_model())).unwrap();
@@ -1731,7 +1772,7 @@ mod tests {
     #[test]
     fn fields_the_catalog_omits_fall_through() {
         let (_tmp, state_dir) = temp_state_dir();
-        super::seed_catalog_for_tests(builtin_catalog(), state_dir);
+        let _seed = super::seed_catalog_for_tests(builtin_catalog(), state_dir);
         let curated = &deepseek::SPEC.models()[0];
         let spec = ProviderRegistry::for_slug(BUILTIN_SLUG).unwrap();
 
@@ -1759,7 +1800,7 @@ mod tests {
             "@ai-sdk/openai-compatible",
             Some("https://api.deepseek.com"),
         );
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
 
         let spec = ProviderRegistry::for_slug(BUILTIN_SLUG).unwrap();
         let model = Model::from_spec(&format!("{BUILTIN_SLUG}/{UNLISTED_MODEL}")).unwrap();
@@ -1954,7 +1995,7 @@ mod tests {
     #[test]
     fn catalog_miss_falls_back_to_family() {
         let (_tmp, state_dir) = temp_state_dir();
-        super::warm_empty_catalog_for_tests(state_dir);
+        let _seed = super::warm_empty_catalog_for_tests(state_dir);
 
         let model = super::Model::from_spec("opencode-go/unlisted-model").unwrap();
         assert!(!model.supports_vision());
@@ -1983,7 +2024,7 @@ mod tests {
                 models,
             },
         )]);
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
         crate::model_registry::set_known_models(
             "opencode-go",
             vec![ModelInfo {

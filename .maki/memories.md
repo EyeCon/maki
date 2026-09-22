@@ -134,13 +134,15 @@
 - `stylua`, `nix` not installed in this env (as of 2026-08-28); CI runs `stylua --check
   plugins/`. Tests run via `make test` (plain `cargo test`; nextest was dropped
   2026-09-17). Build recipes live in the `Makefile`.
-- maki-providers model tests (`model::tests::discovered_*`, `catalog::tests`) are flaky
-  — they race on globals (`set_known_models`, `SHARED_CATALOG` OnceLock in
-  `catalog.rs` whose first init reads the real user config + on-disk cache, racing
-  `seed_catalog_for_tests`). Confirmed failing on pristine main (2026-09-04):
-  2 fail parallel, 1 single-threaded (`catalog::…::free_opencode_model_is_free`);
-  `model::tests::discovered_pricing_decides_free::priced_is_not_free` fails even solo
-  on this machine. Unrelated to feature work.
+- maki-providers catalog tests were broken after dropping nextest (fixed 2026-09-22):
+  `seed_catalog_for_tests` used one-shot `SHARED_CATALOG.set`, so the first initializer
+  won for the whole shared `cargo test` process and later seeds were dropped (5 failures
+  when the suite ran together; each passed alone). Fix: `replace_shared_catalog` overwrites
+  in place (also used by `refresh_catalog`), and `seed_catalog_for_tests` /
+  `warm_empty_catalog_for_tests` return a `CatalogSeedGuard` bound as `let _seed = …` so
+  fixtures stay locked for the whole test (`SEED_LOCK`). Regression:
+  `seed_replaces_an_already_warmed_catalog`. Remaining flake: `model::tests::discovered_*`
+  still race on `set_known_models`.
 - maki-pack `manager::tests::{apply_update_rejects_*, lockfile_restore_acts_*,
   update_is_prepared_*, dropping_the_lock_entry_*}` flake under parallel cargo test
   with `Lock(Held { .. })` on their own unique temp paths; pass with
