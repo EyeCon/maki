@@ -158,6 +158,16 @@
   maki-ui `components::messages::tests::{live_snapshot_uses_panel_generation,
   theme_switch_repaints_highlighted_code}` (read the global theme GENERATION counter,
   bumped by other tests calling `theme::set`). Unrelated to feature work.
+- Confirmed flaky again 2026-09-23 (rebase verification; all pass solo / on rerun,
+  all in files byte-identical to the rebase base `vwkqrpyx`):
+  - maki-agent `file_index::tests::*` (8 tests, varying subset fails each run under
+    parallel OR `--test-threads=1`; "walk never reached the state the test waits
+    for" / walk-budget asserts — shared walk state across the suite).
+  - maki-lua `api::fs::tests::{a_query_superseded_mid_flight_publishes_nothing,
+    files_omits_highlights_until_they_are_asked_for}` (pass as a group via
+    `cargo test -p maki-lua --lib api::fs` and solo).
+  - maki-providers `providers::dynamic::tests::discover_accepts_all_bases::base_deepseek`
+    (alongside the known `model::tests::discovered_*` race).
 - `_ignored/nim-probe` is a scratch cargo project that dumps Nim tree-sitter ASTs
   (`cargo run -- <file.nim>`); handy for extractor iteration.
 
