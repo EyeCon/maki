@@ -34,13 +34,13 @@ fn posix_fmt_is_12h(fmt: &[u8]) -> bool {
 #[cfg(unix)]
 fn system_uses_12h() -> bool {
     use std::ffi::CStr;
-    // The libc crate does not bind `nl_langinfo_l` on Apple targets,
-    // but macOS provides it via `xlocale.h`.
-    #[cfg(target_vendor = "apple")]
+    // The libc crate does not bind `nl_langinfo_l` on Apple targets or on
+    // NetBSD, but both provide it (macOS via `xlocale.h`).
+    #[cfg(any(target_vendor = "apple", target_os = "netbsd"))]
     unsafe extern "C" {
         fn nl_langinfo_l(item: libc::nl_item, locale: libc::locale_t) -> *mut libc::c_char;
     }
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(not(any(target_vendor = "apple", target_os = "netbsd")))]
     use libc::nl_langinfo_l;
     unsafe {
         let loc = libc::newlocale(libc::LC_TIME_MASK, c"".as_ptr(), std::ptr::null_mut());
