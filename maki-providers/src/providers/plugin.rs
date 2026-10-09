@@ -2475,7 +2475,7 @@ mod tests {
             api: Some(EXAMPLE_BASE_URL.into()),
             models: HashMap::new(),
         };
-        catalog::seed_catalog_for_tests(
+        let _seed = catalog::seed_catalog_for_tests(
             HashMap::from([(CATALOG_SLUG.into(), provider)]),
             StateDir::from_path(Default::default()),
         );
