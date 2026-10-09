@@ -9,7 +9,8 @@
 - crates.io `tree-sitter-nim` 0.1.0 is an unrelated toy grammar (117-line grammar.js) —
   never use it. Real Nim grammar: github.com/alaviss/tree-sitter-nim (MPL-2.0).
 - flake.nix `gitDepHashes`: tree-sitter-nim entry has hash `""` — run `nix build`, paste
-  the real hash from the mismatch error (nix wasn't available when added).
+  the real hash from the mismatch error (nix wasn't available when added). Moot on
+  this branch: `vwkqrpyx` deleted `flake.nix`/`flake.lock`, so there is no hash to pin.
 
 ## Nim grammar quirks (plugins/index/lang/nim.lua)
 
@@ -148,6 +149,11 @@
   fixtures stay locked for the whole test (`SEED_LOCK`). Regression:
   `seed_replaces_an_already_warmed_catalog`. Remaining flake: `model::tests::discovered_*`
   still race on `set_known_models`.
+- One call site was missed by that fix and broke `make lint` (`-D warnings` turns the
+  `unused_must_use` into an error): `maki-providers/src/providers/plugin.rs`
+  `a_served_catalog_slug_is_reserved_for_third_parties`. Fixed 2026-10-09 by binding
+  `let _seed =`. When making a `#[must_use]` return type, grep every caller crate, not
+  just the ones in the same module.
 - maki-pack `manager::tests::{apply_update_rejects_*, lockfile_restore_acts_*,
   update_is_prepared_*, dropping_the_lock_entry_*}` flake under parallel cargo test
   with `Lock(Held { .. })` on their own unique temp paths; pass with
@@ -162,7 +168,10 @@
   all in files byte-identical to the rebase base `vwkqrpyx`):
   - maki-agent `file_index::tests::*` (8 tests, varying subset fails each run under
     parallel OR `--test-threads=1`; "walk never reached the state the test waits
-    for" / walk-budget asserts — shared walk state across the suite).
+    for" / walk-budget asserts — shared walk state across the suite). Re-confirmed
+    2026-10-09: 9 of them fail on pristine `main` under plain `cargo test`, so
+    `make test` is red on this branch for a reason that predates it. They need
+    nextest's process-per-test isolation, so dropping nextest was only half-done.
   - maki-lua `api::fs::tests::{a_query_superseded_mid_flight_publishes_nothing,
     files_omits_highlights_until_they_are_asked_for}` (pass as a group via
     `cargo test -p maki-lua --lib api::fs` and solo).
@@ -178,13 +187,31 @@
   `maki-lua/tests/spec.rs` include_str!.
 - Bundled plugins are compiled into the binary → `cargo build` required after lua edits.
 
-## Local stack layout (post-rebase 2026-09-17)
+## Local stack layout (post-rebase 2026-10-09)
 
-- Three parallel branches sit on `main`, merged by `xxly` ("merge:
-  feat-nim-support + feat-extra-body"), followed by `ztzs` (adapt-ci) →
-  `kosv` (Update memories) → `xlwm` (Replace justfile with Makefile):
-  `feat-extra-body` = xwzy → kmyk → puzm, `feat-nim-support` = lyzv (Nim
-  indexing), plus `feat-filter-models` = rztk (OpenRouter `/models/user`,
-  kept as a third parent of the merge). The upstream-equivalent parts of
-  rztk's path parameterization were resolved into `MODELS_PATH` style during
-  the rebase; its net diff is only the OpenRouter endpoint change.
+- `megamerge` (bookmark on `omoz`) is the integration branch: 14 commits on
+  `main`. `vwk` (Remove flake.nix) → `rztk` (OpenRouter `/models/user`) →
+  `xxly` (merge of `xwzy` → `kmyk` → `puzm` = feat-extra-body with `lyzv` =
+  Nim indexing and `rztk` as the third parent) → `ztzs` (adapt-ci) → `kosv`
+  (Update memories) → `xlwm` (Replace justfile with Makefile) → `lnq` (nextest
+  → cargo test) → `uyn` (Add maki permissions) → `qky` (reseed shared catalog)
+  → `omoz` (MAKI_LOG_WIRE docs). `exp-jjmcp` (`vsoy`) is a scratch experiment
+  branching off `omoz`; leave it alone.
+- Rebased onto `main` 2026-10-09; conflicts resolved oldest-first via
+  `jj new` → resolve → `jj squash`. What the resolutions decided:
+  - `AGENTS.md`: drop the `## Nix` section (matches the original `lyzv`).
+  - `release.yml`: keep upstream's `build-netbsd`, keep the branch's
+    `build-other` → `build-windows` rename, publish needs
+    `[create-release, build-linux, build-netbsd, build-windows]`.
+  - `.github/workflows/`: only `release.yml` survives. `nix.yml`, `python.yml`
+    AND `rust.yml` were all deleted by `ztzs`; there is no Rust CI on this
+    branch. Upstream's rust.yml edits were correctly dropped.
+  - `justfile` deleted, so main's new `just install` task was ported to an
+    `install` target in the `Makefile` (also in `.PHONY` and the default echo).
+- Rebuilding generated docs needs network: `make gen-docs` silently DROPS every
+  provider it cannot fetch a model catalog for (DeepSeek, OpenRouter, Requesty,
+  Synthetic, Regolo, TensorX, ...). Never regenerate offline; hand-edit
+  `site/docs/content/**` instead and verify the text against the Rust source
+  (e.g. `DISCOVERY_NOTE` in `maki-providers/src/providers/openrouter.rs`).
+- `maki-docgen/src/main.rs` still prints "run `just gen-docs`" — stale since
+  `xlwm` removed the justfile, left as-is.
