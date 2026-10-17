@@ -1,0 +1,265 @@
+# Memories
+
+## Tree-sitter grammars
+
+- Workspace uses `tree-sitter` 0.25 (downgraded from 0.26 for Nim): the `tree-sitter`
+  crate has `links = "tree-sitter"`, so only ONE version can exist in the graph. The
+  alaviss Nim grammar (git-only, rev-pinned `ac72ba30d16edf0be021588a9301ede4accd6cf4`)
+  pins `tree-sitter ~0.25`. Don't re-bump tree-sitter without checking grammar deps.
+- crates.io `tree-sitter-nim` 0.1.0 is an unrelated toy grammar (117-line grammar.js) —
+  never use it. Real Nim grammar: github.com/alaviss/tree-sitter-nim (MPL-2.0).
+- flake.nix `gitDepHashes`: tree-sitter-nim entry has hash `""` — run `nix build`, paste
+  the real hash from the mismatch error (nix wasn't available when added). Moot on
+  this branch: `vwkqrpyx` deleted `flake.nix`/`flake.lock`, so there is no hash to pin.
+
+## Nim grammar quirks (plugins/index/lang/nim.lua)
+
+- `##` doc comments are extras that attach INSIDE the previously-parsed node's child
+  chain, inflating that node's end line; they are NOT siblings of the next item, so the
+  framework's doc-attach-forward rarely fires. `effective_end_line` walks the rightmost
+  child chain skipping trailing comments to fix ranges.
+- `test "name":` parses as a `call` node with `function` text `"test"` (no dedicated node).
+- Import text is parsed textually (grammar wraps paths in expression_lists/infix
+  expressions); except/alias clauses are stripped, bracket lists `std/[os, strfmt]` fan
+  out via `module_paths` + depth-aware `split_modules`.
+
+## OpenRouter presets / extra_body
+
+- Model listing hits `GET /api/v1/models/user` (added 2026-09-09), the key-filtered
+  endpoint (provider preferences / privacy / guardrails), not `/models`; same
+  `data[]` schema so `parse_model` is unchanged. `fetch_and_parse_models` takes the
+  listing path as a param (other compat callers pass `/models`).
+- OpenRouter presets: 3 reference styles — `"model": "@preset/slug"`, separate
+  `"preset": "slug"` body field, `"model": "model@preset/slug"`. Style 1/3 work with
+  zero maki code (`openrouter/@preset/slug`): `build_body` sends `model.id` verbatim
+  and unknown ids for known provider slugs fall back to manifest defaults (zero
+  pricing → $0 cost display, 200k context). Custom `ModelDef`s under builtin slugs
+  are ignored (`ignored_builtin_fields`), so those fallbacks can't be fixed via
+  providers.toml.
+- extra_body mechanics: `ProviderDef.extra_body` (BTreeMap<String, Value>) in
+  providers.toml is merged into every inference body at
+  `OpenAiCompatProvider::wire_body` (send path: `serde_json::to_vec(&wire_body(body))`).
+  Auto-resolved in `OpenAiCompatProvider::new` for builtin openai-compat slugs
+  (openrouter, zai, mistral, deepseek, tensorx, synthetic, regolo, opencode, xai,
+  openai, aperture, ollama, llama-cpp). Empty-slug compat configs (opencode
+  catalog) skip the providers.toml load by construction, so no auto-resolve
+  there; custom providers get theirs via `with_extra_body` in `custom::create`
+  (openai + openai-responses paths; custom anthropic/google ignore it). Flagged
+  in `ignored_builtin_fields` for builtins whose inventory protocol isn't openai.
+- Per-key strategies for combining with maki's computed fields
+  (`ProviderDef.extra_body_policy`, BTreeMap<String, ExtraBodyPolicy>, added
+  2026-09-05, change wlummqpn — replaces an earlier hardcoded `tools` append):
+  - `replace` (default): config value wins wholesale. Strategy for keys maki
+    never computes — OpenRouter `preset`, provider routing
+    (`[openrouter.extra_body.provider]`, e.g. `ignore = ["relace/fp4"]`),
+    scalar knobs, deprecated `plugins`.
+  - `merge`: objects merge recursively, arrays concatenate, scalars replace;
+    a computed-missing key is set. Strategy for extending computed
+    arrays/objects — OpenRouter server tools
+    (`[[openrouter.extra_body.tools]] type = "openrouter:web_search"` keeps
+    maki's client tools and appends the server tool; verified via base_url
+    capture: 18 client tools intact + server tool), `stream_options.include_usage`,
+    responses-protocol `reasoning` overrides. Merge cannot shrink or reorder a
+    computed array — only append; wholesale reshaping needs `replace`.
+  - `remove`: deletes the computed field; a configured value under the key is
+    ignored. Strategy for stripping computed fields (e.g. `stream_options`);
+    works even with an empty `extra_body` (separate removal pass).
+  - Unknown policy strings fail the TOML parse at startup (exit code 2).
+- TOML shape: nested keys under `extra_body` need full dotted headers
+  (`[openrouter.extra_body.provider]` after a `[[openrouter.extra_body.tools]]`
+  array-of-tables lands at `extra_body.provider`, not inside the last tool
+  element; a bare `[...tools]` table header after the array-of-tables is a TOML
+  error).
+- Verification recipe, easiest first: (1) `MAKI_LOG_WIRE=1 MAKI_LOG=debug` logs
+  the full serialized request body at the send sites into
+  `~/.local/logs/maki/maki.log` (added 2026-09-05: `log_wire_body` in
+  providers/mod.rs, wired at openai_compat chat_completions, openai responses,
+  anthropic messages, google streamGenerate; body contains prompts — opt-in
+  debug only). Documented for users 2026-09-22 in the generated providers page
+  ("Debugging request bodies", gen_providers.rs) with `MAKI_LOG=debug` (the
+  default filter is info, so the env flag alone is not enough) and a
+  cross-link to the plugins development-loop section. `merge` array wording in
+  the same page and in rustdoc now says append (computed first, extra last),
+  not bare "concatenate". (2) `--print --verbose` / stream-json for logical turn-by-turn;
+  session `.jsonl` files under `~/.local/state/maki/sessions/`. (3)
+  `OPENROUTER_BASE_URL=http://127.0.0.1:PORT/v1` env override pointing at a
+  local capture server that dumps POST bodies and answers with a minimal SSE
+  stream — byte-exact wire proof incl. headers, needed only when the log is
+  not enough (e.g. response-side behavior).
+- Gotcha: maki-config's test binary does NOT link maki-providers, so `inventory`
+  builtin-provider entries are empty there — `ignored_builtin_fields` tests that
+  depend on `builtin_provider` must live in maki-providers tests.
+
+## OpenCode per-model protocol routing (change rntoqxlm, 2026-10-11)
+
+- models.dev moved the protocol from the provider row to the model row: a model can
+  carry its own `provider.npm` that outranks the provider's. For `opencode-go`,
+  13 of 36 models do (7 `@ai-sdk/openai` → `/responses`, 6 `@ai-sdk/anthropic` →
+  `/messages`); `opencode` (zen) has 56. Maki picked the endpoint from the
+  provider-level `npm` only, so pinned models went to `/chat/completions` and
+  OpenCode answered `ModelProtocolUnsupported` (400). Only some models failed —
+  the rows with no model-level `npm` genuinely are openai-compatible.
+- `CatalogShape` now keeps `npm` (it was deserialized and discarded), and
+  `CatalogMeta.api_format` carries the per-model override with `None` meaning "ask
+  the provider". Both dispatch sites prefer it: `CatalogProvider::stream_message`
+  and `Opencode::lookup`. Unknown npm values stay `ChatCompletions` so a newly
+  published SDK degrades instead of vanishing from the picker.
+- The Responses arm reuses the existing `pub(crate)` `responses::{build_body,
+  apply_responses_reasoning, do_stream}` — no new encoder. It also wires reasoning
+  effort, which `codec.rs` still carries a TODO for. No `max_tokens` is set there,
+  matching the existing `Protocol::OpenaiResponses` path.
+- **OpenCode gateway gotchas, both confirmed live:** `/messages` rejects
+  `authorization: Bearer` with `AuthError: Missing API key` and needs `x-api-key`
+  (mirrored in `mirror_bearer_as_x_api_key`, scoped to the Messages arm only, since
+  `auth_headers` keys off the provider npm and would leak it everywhere). And
+  `x-opencode-session` is checked *before* protocol validation — without it you get
+  `MissingSessionID` and can never observe `ModelProtocolUnsupported`, so a bare
+  `curl` probe cannot reproduce the bug.
+- **The catalog cache was a lossy round-trip — this bit us.** `save_cached_catalog_async`
+  re-serialized the *parsed* `CatalogIndex`, so every field maki didn't model was
+  destroyed on write, and a cache written by an older binary kept serving rows
+  without `npm` for the full 24h TTL. Adding the struct field alone looked correct
+  and passed its unit test while the real path stayed broken. Now
+  `fetch_remote_catalog_async` returns the body alongside the parsed index and the
+  body is cached verbatim. **When adding a `CatalogModel`/`CatalogShape` field, no
+  cache work is needed — and if a new field seems to do nothing, suspect a stale
+  `~/.cache/maki/models-dev-catalog.json` before suspecting the parse.**
+- Live probes live in `_ignored/probe-opencode.sh` (3 endpoints × N models, needs
+  `x-opencode-session` + `x-api-key`) and `_ignored/verify-muse-spark.sh` (end-to-end
+  through maki via `--print --output-format stream-json`; `MAKI_MODEL` overrides the
+  model, which is how to exercise the Messages path). The Anthropic-routed models
+  are still only verified at the HTTP layer, not through maki's in-process path.
+
+## metaconfig.toml (config file redirects, added 2026-09-05, change qwvmrzzs)
+
+- `maki-storage/src/metaconfig.rs`: discovered at `<cwd>/.maki/metaconfig.toml` first,
+  then config search dirs; first found wins; read once per process (OnceLock, like
+  paths STRATEGY). Format: `[files]` table, keys are config names (`providers.toml`,
+  `permissions.toml`, `mcp.toml`, `init.lua`, `.env`, `providers/`, `commands/`,
+  `themes/`), values are paths (relative resolve against the metaconfig file's own
+  dir, `~` expands).
+- Semantics: value naming an existing file replaces the search for that name
+  entirely; a directory (or a not-yet-existing path, so typos fail soft) searches
+  `<dir>/<name>` before the regular dirs and falls back to them.
+- Wiring: `paths::find_config_path` delegates to `metaconfig::find` → providers.toml,
+  mcp.toml, .env, and the dynamic `providers/` dir redirect for free. Global
+  `permissions.toml` and `init.lua` iterate `metaconfig::candidates`; `commands/` and
+  `themes/` use `metaconfig::dir_override` (scan callers: override scanned last so it
+  wins last-wins scans). Project files (`.maki/init.lua` etc.) keep fixed locations.
+- Precedence change: global permissions.toml is now first-existing-wins across search
+  dirs (was last-wins) so override > legacy > xdg is coherent everywhere.
+- Test pattern: pure cores `metaconfig_path`, `parse`, `candidates_with`,
+  `dir_override_with` take cwd/dirs/entries; never touch the cached OnceLock in tests.
+- e2e probe trick: a malformed redirected providers.toml hard-exits printing the exact
+  path read (`maki models` exits 2) — decisive proof of which file was loaded; custom
+  provider + missing `api_key_env` error is the positive-path probe.
+
+## Test infrastructure (maki-providers, added 2026-09-17)
+
+- `spawn_mock_endpoint` (openai_compat.rs tests; a GET-only variant lives in
+  openrouter.rs tests): one-shot `TcpListener` on `127.0.0.1:0` that reads one
+  request (head + content-length body), reports `(path, parsed body)` over a
+  channel, replies with a fixed response. `ResolvedAuth::for_test(base_url,
+  headers)` points a provider at it; base_url on auth wins over everything.
+- Wire regression tests pinned this way: `do_stream_sends_the_wire_body`
+  (xwzy: the socket body is `wire_body`'s output), the OpenRouter
+  `list_models_queries_the_key_filtered_endpoint` test (rztk: hits
+  `/models/user`), policy shapes (`merge_extra_combines_shapes`,
+  remove-without-extra-body), and `log_wire_body` capture (puzm:
+  `tracing_subscriber` + `with_default` + a `LogCapture` MakeWriter; the two
+  env-setting tests share a `WIRE_LOG_ENV` mutex so `MAKI_LOG_WIRE` flips
+  stay ordered in the shared process).
+- lyzv: `nim_extension_resolves_and_parses` in maki-lua/src/language.rs pins
+  nim/nims/nimble → `Language::Nim`.
+- The bash tool's `workdir` param is unreliable in this env — it kept the repo
+  root as cwd and one `cargo run` nearly clobbered `src/main.rs`. Always
+  prefix `cd <dir> &&` or use `--manifest-path`.
+
+## Environment / testing
+
+- `stylua`, `nix` not installed in this env (as of 2026-08-28); CI runs `stylua --check
+  plugins/`. Tests run via `make test` (plain `cargo test`; nextest was dropped
+  2026-09-17). Build recipes live in the `Makefile`.
+- maki-providers catalog tests were broken after dropping nextest (fixed 2026-09-22):
+  `seed_catalog_for_tests` used one-shot `SHARED_CATALOG.set`, so the first initializer
+  won for the whole shared `cargo test` process and later seeds were dropped (5 failures
+  when the suite ran together; each passed alone). Fix: `replace_shared_catalog` overwrites
+  in place (also used by `refresh_catalog`), and `seed_catalog_for_tests` /
+  `warm_empty_catalog_for_tests` return a `CatalogSeedGuard` bound as `let _seed = …` so
+  fixtures stay locked for the whole test (`SEED_LOCK`). Regression:
+  `seed_replaces_an_already_warmed_catalog`. Remaining flake: `model::tests::discovered_*`
+  still race on `set_known_models`.
+- One call site was missed by that fix and broke `make lint` (`-D warnings` turns the
+  `unused_must_use` into an error): `maki-providers/src/providers/plugin.rs`
+  `a_served_catalog_slug_is_reserved_for_third_parties`. Fixed 2026-10-09 by binding
+  `let _seed =`. When making a `#[must_use]` return type, grep every caller crate, not
+  just the ones in the same module.
+- maki-pack `manager::tests::{apply_update_rejects_*, lockfile_restore_acts_*,
+  update_is_prepared_*, dropping_the_lock_entry_*}` flake under parallel cargo test
+  with `Lock(Held { .. })` on their own unique temp paths; pass with
+  `--test-threads=1` and solo. Confirmed identical on pristine main (2026-09-17).
+- More pre-existing flakes, both confirmed failing on pristine main (2026-09-05):
+  maki-lua `pack::tests::update_review_*` / `applied_update_records_*` (varying
+  failures per run, pass solo; "locked by another Maki process" staleness) and
+  maki-ui `components::messages::tests::{live_snapshot_uses_panel_generation,
+  theme_switch_repaints_highlighted_code}` (read the global theme GENERATION counter,
+  bumped by other tests calling `theme::set`). Unrelated to feature work.
+- Confirmed flaky again 2026-09-23 (rebase verification; all pass solo / on rerun,
+  all in files byte-identical to the rebase base `vwkqrpyx`):
+  - maki-agent `file_index::tests::*` (8 tests, varying subset fails each run under
+    parallel OR `--test-threads=1`; "walk never reached the state the test waits
+    for" / walk-budget asserts — shared walk state across the suite). Re-confirmed
+    2026-10-09: 9 of them fail on pristine `main` under plain `cargo test`, so
+    `make test` is red on this branch for a reason that predates it. They need
+    nextest's process-per-test isolation, so dropping nextest was only half-done.
+  - maki-lua `api::fs::tests::{a_query_superseded_mid_flight_publishes_nothing,
+    files_omits_highlights_until_they_are_asked_for}` (pass as a group via
+    `cargo test -p maki-lua --lib api::fs` and solo).
+  - maki-providers `providers::dynamic::tests::discover_accepts_all_bases::base_deepseek`
+    (alongside the known `model::tests::discovered_*` race).
+  - 2026-10-11, re-confirmed on a pristine parent while working `rntoqxlm`: maki-agent
+    `file_index::tests::*` (9 failures) and the maki-lua suites (`batch_policy`,
+    `code_execution_policy`, `plugin_host`, `provider_plugin` — several fail with
+    `provider 'X' is already registered`, shared global registration state).
+    maki-providers is also badly flaky right now: three consecutive runs of identical
+    code gave 31, 21 and 35 failures, all `DuplicateSlug(...)` collisions from shared
+    process-global state under parallel threads. Treat a maki-providers failure count
+    as noise unless the *set* of failing test names is stable.
+- `_ignored/nim-probe` is a scratch cargo project that dumps Nim tree-sitter ASTs
+  (`cargo run -- <file.nim>`); handy for extractor iteration.
+
+## Conventions confirmed
+
+- Plugin specs: add `tests/lang/<lang>.lua` case file + `require` line in
+  `plugins/index/tests/spec.lua` (alphabetized); runs as one Rust test per plugin via
+  `maki-lua/tests/spec.rs` include_str!.
+- Bundled plugins are compiled into the binary → `cargo build` required after lua edits.
+
+## Local stack layout (post-rebase 2026-10-09)
+
+- `megamerge` (bookmark on `omoz`) is the integration branch: 14 commits on
+  `main`. `vwk` (Remove flake.nix) → `rztk` (OpenRouter `/models/user`) →
+  `xxly` (merge of `xwzy` → `kmyk` → `puzm` = feat-extra-body with `lyzv` =
+  Nim indexing and `rztk` as the third parent) → `ztzs` (adapt-ci) → `kosv`
+  (Update memories) → `xlwm` (Replace justfile with Makefile) → `lnq` (nextest
+  → cargo test) → `uyn` (Add maki permissions) → `qky` (reseed shared catalog)
+  → `omoz` (MAKI_LOG_WIRE docs). `exp-jjmcp` (`vsoy`) is a scratch experiment
+  branching off `omoz`; leave it alone.
+- Rebased onto `main` 2026-10-09; conflicts resolved oldest-first via
+  `jj new` → resolve → `jj squash`. What the resolutions decided:
+  - `AGENTS.md`: drop the `## Nix` section (matches the original `lyzv`).
+  - `release.yml`: keep upstream's `build-netbsd`, keep the branch's
+    `build-other` → `build-windows` rename, publish needs
+    `[create-release, build-linux, build-netbsd, build-windows]`.
+  - `.github/workflows/`: only `release.yml` survives. `nix.yml`, `python.yml`
+    AND `rust.yml` were all deleted by `ztzs`; there is no Rust CI on this
+    branch. Upstream's rust.yml edits were correctly dropped.
+  - `justfile` deleted, so main's new `just install` task was ported to an
+    `install` target in the `Makefile` (also in `.PHONY` and the default echo).
+- Rebuilding generated docs needs network: `make gen-docs` silently DROPS every
+  provider it cannot fetch a model catalog for (DeepSeek, OpenRouter, Requesty,
+  Synthetic, Regolo, TensorX, ...). Never regenerate offline; hand-edit
+  `site/docs/content/**` instead and verify the text against the Rust source
+  (e.g. `DISCOVERY_NOTE` in `maki-providers/src/providers/openrouter.rs`).
+- `maki-docgen/src/main.rs` still prints "run `just gen-docs`" — stale since
+  `xlwm` removed the justfile, left as-is.
