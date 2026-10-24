@@ -36,7 +36,6 @@ const CONFIGURED_URL: &str = "https://configured.example/v1";
 const OWN_HOST: &str = "declared.example";
 const OWN_DISPLAY_NAME: &str = "Configured";
 
-const CONFIG_DIR_FAILED: &str = "the isolated config directory did not resolve";
 const WRITE_FAILED: &str = "providers.toml could not be written";
 const PROVIDER_LOST: &str = "a providers.toml overlay took the slug off its declaration";
 const BUILT_DESPITE_BAD_HEADER: &str = "a bad [<slug>.headers] must fail the build";
@@ -46,13 +45,14 @@ const PLAN_HOST: &str = "plan.overlaid.example";
 const PLAN_KEY_ENV: &str = "MAKI_TEST_PLANNED_PROVIDER_KEY";
 
 /// Points every base directory at a throwaway tree holding `providers.toml`,
-/// so no case reads this machine's config. The file goes wherever maki's own
-/// path resolution says it lives, so a test can never quietly write somewhere
-/// nothing reads.
+/// so no case reads this machine's config. The override pins the file to this
+/// case's own directory, so even a config dir memoized by an earlier test in
+/// the same `cargo test` process cannot be where reads and saves land.
 fn isolated(providers_toml: &str) -> TempDir {
     let dir = isolated_home();
-    let config = maki_storage::paths::config_dir().expect(CONFIG_DIR_FAILED);
-    fs::write(config.join(PROVIDERS_FILE), providers_toml).expect(WRITE_FAILED);
+    let file = dir.path().join(PROVIDERS_FILE);
+    unsafe { std::env::set_var(maki_config::providers::PROVIDERS_FILE_OVERRIDE, &file) };
+    fs::write(&file, providers_toml).expect(WRITE_FAILED);
     dir
 }
 
