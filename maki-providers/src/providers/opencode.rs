@@ -256,7 +256,8 @@ impl Opencode {
                 .clone(),
         };
         let auth = provider_data.request_auth(auth, session_id);
-        Ok((meta.clone(), provider_data.api_format, auth))
+        let api_format = meta.api_format.unwrap_or(provider_data.api_format);
+        Ok((meta.clone(), api_format, auth))
     }
 }
 
