@@ -1996,6 +1996,13 @@ mod tests {
             Canned::json(200, r#"{"data":[]}"#),
         ];
         let _home = isolated_home();
+        // The config save below must not reach the machine's real
+        // providers.toml: pin it inside the isolated home, and unpin before
+        // the temp dir drops so parallel tests cannot inherit the override.
+        let providers_toml = _home.path().join("providers.toml");
+        unsafe {
+            std::env::set_var(maki_config::providers::PROVIDERS_FILE_OVERRIDE, &providers_toml)
+        };
         let (base, requests) = serve(MODELS);
         let first = Arc::new(CountingAuth::new(true));
         let next = Arc::new(CountingAuth::new(false));
@@ -2039,6 +2046,7 @@ mod tests {
             tokens,
             [FIRST_TOKEN, FIRST_TOKEN, CONSTANT_TOKEN, FIRST_TOKEN]
         );
+        unsafe { std::env::remove_var(maki_config::providers::PROVIDERS_FILE_OVERRIDE) };
     }
 
     #[test]

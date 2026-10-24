@@ -16,6 +16,9 @@ use maki_storage::sessions::Effort;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 const PROVIDERS_FILE: &str = "providers.toml";
+/// `MAKI_PROVIDERS_TOML` pins the config file's location. Tests isolate their
+/// fixtures through it; a setup with no usable config dir can too.
+pub const PROVIDERS_FILE_OVERRIDE: &str = "MAKI_PROVIDERS_TOML";
 const BAD_CONFIG_EXIT_CODE: i32 = 2;
 /// The only built-in that reads `enable_free_models`.
 const OPENCODE_SLUG: &str = "opencode";
@@ -389,7 +392,9 @@ impl ProvidersConfig {
     }
 
     fn read() -> Result<Self, String> {
-        let path = providers_file_path();
+        let Some(path) = providers_file_path() else {
+            return Ok(Self::default());
+        };
         let meta = match fs::metadata(&path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
@@ -424,7 +429,12 @@ impl ProvidersConfig {
     pub fn save(&self) -> Result<(), std::io::Error> {
         self.validate()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let path = providers_file_path();
+        let Some(path) = providers_file_path() else {
+            return Err(std::io::Error::other(
+                "cannot determine a providers.toml location: the config dir is unavailable; \
+                 set MAKI_PROVIDERS_TOML to an explicit path",
+            ));
+        };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -464,12 +474,14 @@ impl ProvidersConfig {
 
 /// The `providers.toml` we already read, or where a fresh one goes. Both share
 /// this path so `save` cannot leave a second copy behind in the other dir.
-fn providers_file_path() -> PathBuf {
-    paths::find_config_path(PROVIDERS_FILE).unwrap_or_else(|| {
-        paths::config_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(PROVIDERS_FILE)
-    })
+/// `None` means no location could be determined: reads answer the default, and
+/// saving is an error — better loud than a stray file in the working directory.
+fn providers_file_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(PROVIDERS_FILE_OVERRIDE).filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    paths::find_config_path(PROVIDERS_FILE)
+        .or_else(|| paths::config_dir().ok().map(|dir| dir.join(PROVIDERS_FILE)))
 }
 
 pub fn set_registered_providers(rows: Vec<&'static BuiltInProvider>) {
@@ -803,6 +815,33 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains(SLUG));
         assert!(error.to_string().contains(ERROR));
+    }
+
+    #[test]
+    fn override_pins_reads_and_saves_to_one_file() {
+        const SLUG: &str = "pinned-provider";
+        const ENTRY: &str = "protocol = \"openai\"";
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("providers.toml");
+        let prev = std::env::var_os(PROVIDERS_FILE_OVERRIDE);
+        // SAFETY: the save/restore keeps other tests in the shared
+        // `cargo test` process off this value.
+        unsafe { std::env::set_var(PROVIDERS_FILE_OVERRIDE, &file) };
+        let mut config = ProvidersConfig::load();
+        config.upsert(SLUG.into(), toml::from_str(ENTRY).unwrap());
+        config.save().unwrap();
+        let def = ProvidersConfig::load()
+            .providers
+            .remove(SLUG)
+            .expect("the pinned file must serve the saved entry");
+        assert_eq!(def.protocol, Some(Protocol::Openai));
+        // SAFETY: same shared-process rule as above.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(PROVIDERS_FILE_OVERRIDE, v),
+                None => std::env::remove_var(PROVIDERS_FILE_OVERRIDE),
+            }
+        }
     }
 
     #[test]
