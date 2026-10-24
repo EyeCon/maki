@@ -29,6 +29,7 @@ use maki_storage::id::SessionRef;
 use crate::model::{Model, ModelInfo, ModelPricing};
 use crate::provider::{BoxFuture, Provider};
 use crate::providers::anthropic::shared;
+use crate::providers::openai::responses;
 use crate::providers::openai_compat::{
     DEFAULT_MAX_TOKENS_FIELD, OpenAiCompatConfig, OpenAiCompatProvider,
 };
@@ -78,6 +79,7 @@ const DEFAULT_OUTPUT: u32 = 64_000;
 pub enum EndpointType {
     ChatCompletions,
     Messages,
+    Responses,
 }
 
 /// Behaviour a provider needs beyond what models.dev publishes.
@@ -299,6 +301,10 @@ pub struct CatalogMeta {
     pub pricing: Option<ModelPricing>,
     pub supports_thinking: Option<bool>,
     pub supports_vision: Option<bool>,
+    /// `None` where the row pins no protocol of its own, so the provider's
+    /// format still answers. Sending a pinned model to the provider default is
+    /// what OpenCode rejects with `ModelProtocolUnsupported`.
+    pub api_format: Option<EndpointType>,
 }
 
 impl CatalogMeta {
@@ -534,7 +540,7 @@ fn with_provider_if_available<T>(slug: &str, f: impl FnOnce(&ProviderData) -> T)
 /// wire spells thinking its own way, and a cold catalog gives nothing.
 pub(crate) fn adaptive_effort_if_available(slug: &str) -> Option<Effort> {
     with_provider_if_available(slug, |data| match data.api_format {
-        EndpointType::ChatCompletions => CHAT_DIALECT.adaptive_effort(),
+        EndpointType::ChatCompletions | EndpointType::Responses => CHAT_DIALECT.adaptive_effort(),
         EndpointType::Messages => None,
     })
     .flatten()
@@ -608,12 +614,12 @@ async fn load_cached_catalog_async() -> Option<schema::CatalogIndex> {
     let text = smol::unblock(move || fs::read_to_string(&path))
         .await
         .ok()?;
-    let index: schema::CatalogIndex = serde_json::from_str(&text).ok()?;
+    let index = parse_catalog(&text).ok()?;
     debug!("loaded catalog from cache");
     Some(index)
 }
 
-async fn save_cached_catalog_async(index: &schema::CatalogIndex) {
+async fn save_cached_catalog_async(text: &str) {
     let path = match catalog_cache_path() {
         Some(p) => p,
         None => return,
@@ -622,13 +628,7 @@ async fn save_cached_catalog_async(index: &schema::CatalogIndex) {
         let dir = dir.to_path_buf();
         let _ = smol::unblock(move || fs::create_dir_all(&dir)).await;
     }
-    let text = match serde_json::to_string_pretty(index) {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(error = %e, "failed to serialize catalog for cache");
-            return;
-        }
-    };
+    let text = text.to_owned();
     smol::unblock(move || {
         if let Err(e) = fs::write(&path, &text) {
             warn!(error = %e, path = %path.display(), "failed to write catalog cache");
@@ -639,9 +639,13 @@ async fn save_cached_catalog_async(index: &schema::CatalogIndex) {
     .await;
 }
 
+/// Returns the parsed index plus the exact body it came from. The body is what
+/// gets cached: re-serializing the parsed structs would drop every field maki
+/// does not model yet, so a cache written before a field existed keeps serving
+/// rows without it until the TTL expires.
 async fn fetch_remote_catalog_async(
     client: &HttpClient,
-) -> Result<schema::CatalogIndex, AgentError> {
+) -> Result<(schema::CatalogIndex, String), AgentError> {
     let request = Request::builder()
         .uri(CATALOG_URL)
         .header("user-agent", user_agent())
@@ -667,13 +671,21 @@ async fn fetch_remote_catalog_async(
         .await
         .map_err(|e| config_error(format!("failed to read catalog response body: {e}")))?;
 
-    serde_json::from_str(&text)
+    Ok((parse_catalog(&text)?, text))
+}
+
+fn parse_catalog(text: &str) -> Result<schema::CatalogIndex, AgentError> {
+    serde_json::from_str(text)
         .map_err(|e| config_error(format!("failed to parse catalog JSON: {e}")))
 }
 
+/// A protocol we can speak. Anything unrecognised stays
+/// [`EndpointType::ChatCompletions`], so a newly published npm keeps serving on
+/// the default endpoint rather than disappearing from the picker.
 fn determine_catalog_format(npm: &str) -> EndpointType {
     match npm {
         "@ai-sdk/anthropic" => EndpointType::Messages,
+        "@ai-sdk/openai" => EndpointType::Responses,
         _ => EndpointType::ChatCompletions,
     }
 }
@@ -742,6 +754,11 @@ fn parse_model(model: &schema::CatalogModel) -> CatalogMeta {
         }),
         supports_thinking: model.reasoning,
         supports_vision,
+        api_format: model
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.npm.as_deref())
+            .map(determine_catalog_format),
     }
 }
 
@@ -756,8 +773,8 @@ fn catalog_client() -> HttpClient {
 }
 
 fn fetch_catalog_blocking(state_dir: &StateDir) -> Result<CatalogData, AgentError> {
-    let index = smol::block_on(fetch_remote_catalog_async(&catalog_client()))?;
-    smol::block_on(save_cached_catalog_async(&index));
+    let (index, text) = smol::block_on(fetch_remote_catalog_async(&catalog_client()))?;
+    smol::block_on(save_cached_catalog_async(&text));
     Ok(CatalogData::from_index(index, state_dir))
 }
 
@@ -830,6 +847,9 @@ impl CatalogTransport {
                     .await
             }
             EndpointType::Messages => {
+                let mut auth = auth.clone();
+                mirror_bearer_as_x_api_key(&mut auth);
+                let auth = &auth;
                 let system_blocks = vec![shared::SystemBlock {
                     r#type: "text",
                     text: system,
@@ -868,7 +888,41 @@ impl CatalogTransport {
                     Err(AgentError::from_response(response).await)
                 }
             }
+            EndpointType::Responses => {
+                let mut body = responses::build_body(model, messages, system, tools);
+                responses::apply_responses_reasoning(
+                    &mut body,
+                    opts.thinking,
+                    model,
+                    &dialect::PREFER_HIGH,
+                );
+                responses::do_stream(
+                    &self.client,
+                    model,
+                    &body,
+                    event_tx,
+                    auth,
+                    self.stream_timeout,
+                )
+                .await
+            }
         }
+    }
+}
+
+/// The Anthropic endpoint wants the key in `x-api-key`, but a catalog
+/// sub-provider is an OpenAI-compatible gateway and only carries
+/// `authorization: Bearer`. Verified against the live gateway: `/messages`
+/// answers `AuthError: Missing API key` without the header while accepting the
+/// Bearer form on the other two endpoints.
+fn mirror_bearer_as_x_api_key(auth: &mut ResolvedAuth) {
+    let bearer = auth
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.strip_prefix("Bearer ").map(str::to_owned));
+    if let Some(key) = bearer.flatten() {
+        auth.set_header("x-api-key", key);
     }
 }
 
@@ -954,7 +1008,7 @@ impl Provider for CatalogProvider {
             };
             self.transport
                 .stream(
-                    self.data.api_format,
+                    meta.api_format.unwrap_or(self.data.api_format),
                     &stream_model,
                     messages,
                     system,
@@ -1115,18 +1169,22 @@ pub(crate) fn free_model_if_available(slug: &str, model_id: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use super::schema::{CatalogCost, CatalogIndex, CatalogLimits, CatalogModel, CatalogProvider};
+    use super::schema::{
+        self, CatalogCost, CatalogIndex, CatalogLimits, CatalogModel, CatalogProvider,
+    };
     use std::sync::Arc;
 
     use super::{
         Authentication, CatalogData, CatalogMeta, EndpointType, ProviderData, ProviderQuirks,
-        SessionRef, StateDir, available_if_warm, determine_catalog_format, parse_model, quirks_for,
+        SessionRef, StateDir, available_if_warm, determine_catalog_format,
+        mirror_bearer_as_x_api_key, parse_catalog, parse_model, quirks_for,
     };
     use crate::model::{Model, ModelEntry, ModelInfo, ModelPricing};
     use crate::provider::Provider;
     use crate::providers::{ResolvedAuth, Timeouts, opencode};
     use crate::spec::ProviderRegistry;
     use crate::{AgentError, Effort, ModelFamily, ModelTier, RequestOptions};
+    use serde_json::json;
     use test_case::test_case;
 
     const SESSION_HEADER: &str = "x-opencode-session";
@@ -1216,6 +1274,7 @@ mod tests {
             }),
             supports_thinking: Some(false),
             supports_vision: Some(false),
+            api_format: None,
         }
     }
 
@@ -1321,6 +1380,96 @@ mod tests {
             determine_catalog_format("@ai-sdk/openai-compatible"),
             EndpointType::ChatCompletions
         );
+    }
+
+    #[test]
+    fn catalog_format_responses_for_openai() {
+        assert_eq!(
+            determine_catalog_format("@ai-sdk/openai"),
+            EndpointType::Responses
+        );
+    }
+
+    #[test]
+    fn catalog_format_unknown_npm_stays_chat() {
+        assert_eq!(
+            determine_catalog_format("@ai-sdk/some-future-sdk"),
+            EndpointType::ChatCompletions
+        );
+    }
+
+    fn model_row(npm: Option<&str>) -> schema::CatalogModel {
+        serde_json::from_value(serde_json::json!({
+            "provider": npm.map(|npm| json!({ "npm": npm })),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn model_level_npm_overrides_provider_format() {
+        assert_eq!(
+            parse_model(&model_row(Some("@ai-sdk/openai"))).api_format,
+            Some(EndpointType::Responses)
+        );
+        assert_eq!(
+            parse_model(&model_row(Some("@ai-sdk/anthropic"))).api_format,
+            Some(EndpointType::Messages)
+        );
+    }
+
+    #[test]
+    fn model_without_npm_leaves_format_to_the_provider() {
+        assert_eq!(parse_model(&model_row(None)).api_format, None);
+    }
+
+    #[test]
+    fn messages_auth_mirrors_bearer_into_x_api_key() {
+        let mut auth = ResolvedAuth::new(
+            "opencode-go",
+            vec![("authorization".into(), "Bearer k".into())],
+        )
+        .unwrap();
+        mirror_bearer_as_x_api_key(&mut auth);
+        assert_eq!(
+            auth.headers
+                .iter()
+                .find(|(name, _)| name == "x-api-key")
+                .map(|(_, value)| value.as_str()),
+            Some("k")
+        );
+    }
+
+    #[test]
+    fn cached_catalog_body_keeps_the_model_level_npm() {
+        // The cache is the fetched body verbatim, so a field maki does not
+        // model yet survives the write. Re-serializing the parsed structs would
+        // drop it and leave every model on the provider default.
+        let body = json!({
+            "opencode-go": {
+                "name": "OpenCode Go",
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "https://opencode.ai/zen/go/v1",
+                "models": {
+                    "muse-spark-1.3-contributor": { "provider": { "npm": "@ai-sdk/openai" } }
+                }
+            }
+        })
+        .to_string();
+
+        let index = parse_catalog(&body).unwrap();
+        let re_serialized = serde_json::to_string(&index).unwrap();
+
+        assert!(
+            re_serialized.contains("@ai-sdk/openai"),
+            "round-tripping the parsed index dropped the model npm: {re_serialized}"
+        );
+    }
+
+    #[test]
+    fn messages_auth_leaves_a_keyless_auth_alone() {
+        let mut auth = ResolvedAuth::new("opencode-go", vec![]).unwrap();
+        mirror_bearer_as_x_api_key(&mut auth);
+        assert!(auth.headers.iter().all(|(name, _)| name != "x-api-key"));
     }
 
     #[test]
@@ -2896,5 +3045,10 @@ pub(crate) mod schema {
     pub struct CatalogShape {
         #[serde(default)]
         pub shape: Option<String>,
+        /// Only a model row carries this, and it outranks the provider's own
+        /// `npm`: models.dev pins some models of a single provider to a
+        /// different protocol.
+        #[serde(default)]
+        pub npm: Option<String>,
     }
 }
