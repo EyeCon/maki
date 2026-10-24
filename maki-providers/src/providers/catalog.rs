@@ -2056,7 +2056,7 @@ mod tests {
             catalog_index(id, npm, Some(CATALOG_API_URL), models)
         })
         .collect();
-        super::seed_catalog_for_tests(index, state_dir);
+        let _seed = super::seed_catalog_for_tests(index, state_dir);
 
         assert_eq!(Model::from_spec(spec).unwrap().adaptive_effort(), expected);
     }
