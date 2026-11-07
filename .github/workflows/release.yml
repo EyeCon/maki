@@ -78,6 +78,7 @@ jobs:
     name: Build (${{ matrix.target }})
     needs: create-release
     runs-on: ${{ matrix.runner }}
+    container: debian:bookworm
     env:
       RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
       RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
@@ -85,48 +86,37 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
 
     steps:
+      # Bare image: checkout needs git, the upload step needs gh, the cache
+      # action needs zstd.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential python3-dev pkg-config curl git ca-certificates zstd gh
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Restore cargo/rustup cache
-        uses: actions/cache@v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          path: .cargo-cache
-          key: alpine-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: alpine-${{ matrix.target }}-
+          targets: ${{ matrix.target }}
 
-      - name: Build in Alpine container
-        env:
-          # renovate: datasource=docker depName=alpine
-          ALPINE_VERSION: "3.24"
-        run: |
-          mkdir -p .cargo-cache/cargo .cargo-cache/rustup .cargo-cache/target
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e CARGO_HOME=/workspace/.cargo-cache/cargo \
-            -e RUSTUP_HOME=/workspace/.cargo-cache/rustup \
-            -e CARGO_TARGET_DIR=/workspace/.cargo-cache/target \
-            -e CARGO_TERM_COLOR=always \
-            -e CARGO_INCREMENTAL=0 \
-            "alpine:${ALPINE_VERSION}" sh -c '
-              apk add --no-cache gcc g++ musl-dev make linux-headers curl git ca-certificates pkgconf python3-dev
-              git config --global --add safe.directory /workspace
-              curl --proto "=https" --tlsv1.2 --retry 5 --retry-delay 2 --retry-all-errors -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --target ${{ matrix.target }}
-              source "$CARGO_HOME/env"
-              cargo build --profile release-lto --target ${{ matrix.target }}
-            '
-          sudo chown -R $(id -u):$(id -g) .cargo-cache
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}-${{ github.ref_name }}
+
+      - name: Build
+        run: cargo build --profile release-lto --target ${{ matrix.target }}
 
       - name: Package
         run: |
           archive="${BINARY_NAME}-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz"
-          cp ".cargo-cache/target/${{ matrix.target }}/release-lto/${BINARY_NAME}" "${BINARY_NAME}"
+          cp "target/${{ matrix.target }}/release-lto/${BINARY_NAME}" "${BINARY_NAME}"
           tar czf "${archive}" "${BINARY_NAME}"
           echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
 

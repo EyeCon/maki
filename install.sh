@@ -105,7 +105,7 @@ main() {
         need_cmd unzip
     else
         case "$(uname -s)" in
-            Linux)  os="unknown-linux-musl" ;;
+            Linux)  os="unknown-linux-gnu" ;;
             *) err "unsupported OS: $(uname -s) (this branch builds for Linux and Windows only)" ;;
         esac
 
