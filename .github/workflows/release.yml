@@ -93,12 +93,14 @@ jobs:
 
     steps:
       # Bare image: checkout needs git, the upload step needs gh, the cache
-      # action needs zstd.
+      # action needs zstd, packaging needs upx. upx-ucl is backports-only.
       - name: Install build dependencies
         run: |
+          echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/backports.list
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential python3-dev pkg-config curl git ca-certificates zstd gh
+          apt-get install -y --no-install-recommends -t bookworm-backports upx-ucl
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -115,8 +117,9 @@ jobs:
 
       - name: Package
         run: |
-          archive="${BINARY_NAME}-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz"
           cp "target/${{ matrix.target }}/release-lto/${BINARY_NAME}" "${BINARY_NAME}"
+          upx -9 "${BINARY_NAME}"
+          archive="${BINARY_NAME}-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz"
           tar czf "${archive}" "${BINARY_NAME}"
           echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
 
